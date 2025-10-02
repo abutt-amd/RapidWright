@@ -229,6 +229,9 @@ public class InlineFlopTools {
     private static Cell createAndPlaceFlopInlineOnTopPortInst(Design design, EDIFPortInst portInst, Pair<Site, BEL> loc,
                                                               EDIFHierNet clk) {
         String name = portInst.getFullName() + INLINE_SUFFIX;
+        if (name.startsWith("[]")) {
+            name = name.substring(2);
+        }
         Cell flop = design.createAndPlaceCell(design.getTopEDIFCell(), name, Unisim.FDRE, loc.getFirst(),
                 loc.getSecond());
         Net net = design.createNet(name);
@@ -276,6 +279,9 @@ public class InlineFlopTools {
         for (EDIFCellInst inst : design.getTopEDIFCell().getCellInsts()) {
             if (inst.getName().endsWith(INLINE_SUFFIX)) {
                 Cell flop = design.getCell(inst.getName());
+                if (flop == null) {
+                    throw new RuntimeException("Cell " + inst.getName() + " does not exist in design");
+                }
                 SiteInst si = flop.getSiteInst();
                 // Assume we only placed one flop per SiteInst
                 siteInstToRemove.add(si);

@@ -506,6 +506,7 @@ public class PerformanceExplorer {
                 System.out.println("No implementation passes timing for " + pblock);
             }
 
+            System.out.println("Best design for " + pblock + " is " + bestPath);
             Design d = Design.readCheckpoint(bestPath + File.separator + "routed.dcp");
 
             if (ensureExternalRoutability()) {

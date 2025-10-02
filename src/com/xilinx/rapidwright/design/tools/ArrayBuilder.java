@@ -622,6 +622,9 @@ public class ArrayBuilder {
             array = ab.getTopDesign();
             // Find instances in existing design
             modInstNames = getMatchingModuleInstanceNames(modules.get(0), array);
+            if (modInstNames.isEmpty()) {
+                throw new RuntimeException("ERROR: No matching module instance names found in top design");
+            }
             ab.setInstCountLimit(modInstNames.size());
         }
 
