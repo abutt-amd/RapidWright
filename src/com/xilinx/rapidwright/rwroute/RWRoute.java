@@ -226,12 +226,15 @@ public class RWRoute {
         }
 
         // Pre-processing of the design regarding physical net names pins
+        CodePerfTracker t = new CodePerfTracker(RWRoute.class.getName());
+        t.start("RWRoute Preprocess");
         DesignTools.makePhysNetNamesConsistent(design);
         DesignTools.createPossiblePinsToStaticNets(design);
         DesignTools.createMissingSitePinInsts(design);
         if (series == Series.Versal) {
             DesignTools.updateVersalXPHYPinsForDMC(design);
         }
+        t.stop();
     }
 
     protected void preprocess() {
@@ -849,7 +852,7 @@ public class RWRoute {
         routerTimer.createRuntimeTracker("route static nets", "Routing").start();
         // Routes static nets (VCC and GND) before signals for now.
         // All the used nodes by other nets should be marked as unavailable, if static nets are routed after signals.
-        routeStaticNets();
+//        routeStaticNets();
         // Connection-based router for indirectly connected pairs of output pin and input pin */
         routerTimer.getRuntimeTracker("route static nets").stop();
 

@@ -850,13 +850,15 @@ public class PartialRouter extends RWRoute {
         String routedDCPfileName = args[1];
 
         CodePerfTracker t = new CodePerfTracker("PartialRouter", true);
-
+        t.start("Route Design");
         // Reads in a design checkpoint and routes it
         String[] rwrouteArgs = Arrays.copyOfRange(args, 2, args.length);
         Design routed = routeDesignWithUserDefinedArguments(Design.readCheckpoint(args[0]), rwrouteArgs);
 
         // Writes out the routed design checkpoint
-        routed.writeCheckpoint(routedDCPfileName,t);
+        routed.writeCheckpoint(routedDCPfileName);
         System.out.println("\nINFO: Wrote routed design\n " + routedDCPfileName + "\n");
+        t.stop();
+        t.printSummary();
     }
 }
