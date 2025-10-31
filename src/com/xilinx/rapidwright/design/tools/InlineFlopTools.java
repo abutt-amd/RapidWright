@@ -398,8 +398,8 @@ public class InlineFlopTools {
                 loc.getSecond());
         Net net = design.createNet(name);
         net.connect(flop, portInst.isInput() ? "D" : "Q");
-//        design.getGndNet().connect(flop, "R");
-//        design.getVccNet().connect(flop, "CE");
+        design.getGndNet().connect(flop, "R");
+        design.getVccNet().connect(flop, "CE");
         EDIFHierCellInst flopHierCellInst = flop.getEDIFHierCellInst();
         EDIFHierPortInst clkHierPortInst = flopHierCellInst.getPortInst("C");
         if (clkHierPortInst == null) {
@@ -469,7 +469,9 @@ public class InlineFlopTools {
             // Remove control set pins
             for (String pin : ctrlPins) {
                 EDIFPortInst p = c.getPortInst(pin);
-                p.getNet().removePortInst(p);
+                if (p != null && p.getNet() != null) {
+                    p.getNet().removePortInst(p);
+                }
             }
             // Merge 'D' sources and 'Q' sinks, restore original net
             EDIFPortInst d = c.getPortInst("D");
