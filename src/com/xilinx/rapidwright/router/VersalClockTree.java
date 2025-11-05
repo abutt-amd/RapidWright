@@ -48,6 +48,10 @@ public class VersalClockTree {
      */
     private Map<Integer, int[][]> clockRootPathSets;
 
+    public VersalClockTree() {
+        // No-arg constructor for Kryo serialization
+    }
+
     public VersalClockTree(int minY, int maxY) {
         this.minMaxYKey = getMinMaxYRangeKey(minY, maxY);
     }
