@@ -2605,7 +2605,10 @@ public class DesignTools {
                     if (net.isUsedNet()) {
                         continue;
                     }
-                    EDIFHierNet ehn = net.getLogicalHierNet();
+                    EDIFHierNet ehn;
+                    synchronized (design) {
+                        ehn = net.getLogicalHierNet();
+                    }
                     EDIFHierNet parentEhn = (ehn != null) ? netlist.getParentNet(ehn) : null;
                     if (parentEhn != null && !parentEhn.equals(ehn)) {
                         Net parentNet = design.getNet(parentEhn.getHierarchicalNetName());
