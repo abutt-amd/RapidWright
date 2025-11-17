@@ -67,7 +67,7 @@ public class HoldFixer {
     private RouteNodeGraph routingGraph;
     private Map<Connection, Long> connectionWireLengths;
     private int fixedNets;
-    private int MIN_WIRE_LENGTH = 100;
+    private int MIN_WIRE_LENGTH = 300;
 
     public HoldFixer(Design design, RWRouteConfig config) {
         this.design = design;
@@ -80,12 +80,32 @@ public class HoldFixer {
         connectionWireLengths = new HashMap<>();
     }
 
-    private void rerouteConnection(Connection connection) {
-        System.out.println("Fix: " + connection.getNet() + ", fixed " + fixedNets + " nets so far");
-        long wirelength = 0;
+    private List<Connection> getConnectionsThatAreStillTooShort(List<Connection> connections) {
+        List<Connection> newConnections = new ArrayList<>();
+        for (Connection connection : connections) {
+            if (!connection.getSink().isRouted()) {
+                System.out.println("Failed to get net " + connection.getNet() + " to meet hold time");
+                continue;
+            }
+            // Update wirelength
+            NetWrapper netWrapper = createNetWrapper(connection.getNet());
+            Map<SitePinInst, Pair<Node, Long>> sourceToSinkINTNodeWireLengths =
+                    getSourceToSinkINTNodeWireLengths(netWrapper.getNet());
+            long wirelength = sourceToSinkINTNodeWireLengths.get(connection.getSink()).getSecond();
+            if (wirelength < MIN_WIRE_LENGTH) {
+                newConnections.add(connection);
+            }
+        }
+        System.out.println("Connections remaining to fix: " + newConnections.size());
+        return newConnections;
+    }
+
+    private void rerouteConnections(List<Connection> connections) {
         List<Node> avoidNodes = new ArrayList<>();
-        while (wirelength < MIN_WIRE_LENGTH) {
-            List<SitePinInst> pinsToRoute = new ArrayList<>();
+        List<Connection> currConnections = connections;
+        int connectionsLeft = Integer.MAX_VALUE;
+        List<SitePinInst> pinsToRoute = new ArrayList<>();
+        for (Connection connection : currConnections) {
             Set<PIP> pips = getTrimmablePIPsFromPins(connection.getNet(), Collections.singletonList(connection.getSink()));
             for (PIP pip : pips) {
                 Node endNode = pip.getEndNode();
@@ -95,44 +115,39 @@ public class HoldFixer {
                     avoidNodes.add(endNode);
                 }
             }
-            connection.getNet().unroutePin(connection.getSink());
+            connection.getNet().unroute();
             pinsToRoute.add(connection.getSink());
-
-            // Create the PartialRouter
-            RWRouteConfig config = new RWRouteConfig(new String[]{
-                    "--fixBoundingBox",
-                    "--expandBoundingBox",
-                    // use U-turn nodes and no masking of nodes cross RCLK
-                    // Pros: maximum routability
-                    // Con: might result in delay optimism and a slight increase in runtime
-                    "--useUTurnNodes",
-                    "--nonTimingDriven"});
-            PartialRouter router = new PartialRouter(design, config, pinsToRoute);
-
-            // Initialize router object
-            router.initialize();
-
-            // Prevent router from using nodes that previously created short routes
-            RouteNodeGraph routingGraph = router.routingGraph;
-            for (Node nodeToBlock : avoidNodes) {
-                RouteNode rnode = routingGraph.getOrCreate(nodeToBlock);
-                rnode.setType(RouteNodeType.INACCESSIBLE);
-            }
-
-            // Routes the design
-            router.route();
-            if (!connection.getSink().isRouted()) {
-                break;
-            }
-
-            // Update wirelength
-            NetWrapper netWrapper = createNetWrapper(connection.getNet());
-            Map<SitePinInst, Pair<Node, Long>> sourceToSinkINTNodeWireLengths =
-                    getSourceToSinkINTNodeWireLengths(netWrapper.getNet());
-            wirelength = sourceToSinkINTNodeWireLengths.get(connection.getSink()).getSecond();
-            System.out.println("Wirelength: " + wirelength);
         }
-        fixedNets++;
+
+        // Create the PartialRouter
+        RWRouteConfig config = new RWRouteConfig(new String[]{
+                "--fixBoundingBox",
+                // use U-turn nodes and no masking of nodes cross RCLK
+                // Pros: maximum routability
+                // Con: might result in delay optimism and a slight increase in runtime
+                "--useUTurnNodes",
+                "--nonTimingDriven"});
+        config.setWirelengthWeight(0.6f);
+        PartialRouter router = new PartialRouter(design, config, pinsToRoute);
+
+        // Initialize router object
+        router.initialize();
+
+        // Prevent router from using nodes that previously created short routes
+//            RouteNodeGraph routingGraph = router.routingGraph;
+//            for (Node nodeToBlock : avoidNodes) {
+//                RouteNode rnode = routingGraph.getOrCreate(nodeToBlock);
+//                rnode.setBaseCost(1000000000.0f);
+//            }
+
+        // Routes the design
+        router.route();
+
+        currConnections = getConnectionsThatAreStillTooShort(currConnections);
+        Set<String> nets = new HashSet<>();
+        for (Connection c : currConnections) {
+            nets.add(c.getNet().getName());
+        }
     }
 
     /**
@@ -147,10 +162,19 @@ public class HoldFixer {
         RWRoute.printNodeTypeUsageAndWirelength(true, nodeTypeUsage, nodeTypeLength, design.getSeries());
 
         PriorityQueue<Pair<Connection, Long>> maxHeap = new PriorityQueue<>((a, b) -> Long.compare(b.getSecond(), a.getSecond()));
-        PriorityQueue<Pair<Connection, Long>> minHeap = new PriorityQueue<>(Comparator.comparingLong(Pair::getSecond));
+        PriorityQueue<Pair<Connection, Long>> minHeap = new PriorityQueue<>(
+                (a, b) -> {
+                    if (a.getSecond().equals(b.getSecond())) {
+                        return a.getFirst().getNet().getName().compareTo(b.getFirst().getNet().getName());
+                    }
+                    return Long.compare(a.getSecond(), b.getSecond());
+                });
 
         for (Map.Entry<Connection, Long> entry : connectionWireLengths.entrySet()) {
             if (entry.getValue() != 0) {
+                if (entry.getKey().getNet().getName().equals("u_systolic_array/x[9].y[11].u_tile/x[3].y[1].u_pe/east_outputs[1][2]")) {
+                    System.out.println();
+                }
                 maxHeap.add(new Pair<>(entry.getKey(), entry.getValue()));
                 if (inDifferentClockRegionColumns(entry.getKey().getSource(), entry.getKey().getSink())) {
                     minHeap.add(new Pair<>(entry.getKey(), entry.getValue()));
@@ -158,17 +182,17 @@ public class HoldFixer {
             }
         }
 
-        System.out.println("Setup Time: ");
-        for (int i = 0; i < 10; i++) {
-            Pair<Connection, Long> curr = maxHeap.poll();
-            if (curr != null) {
-                System.out.println(curr.getFirst().getNet() + ", " + curr.getSecond());
-            }
-        }
+//        System.out.println("Setup Time: ");
+//        for (int i = 0; i < 10; i++) {
+//            Pair<Connection, Long> curr = maxHeap.poll();
+//            if (curr != null) {
+//                System.out.println(curr.getFirst().getNet() + ", " + curr.getSecond());
+//            }
+//        }
 
         System.out.println();
         System.out.println("Hold Time: ");
-        for (int i = 0; i < 10; i++) {
+        for (int i = 0; i < 5; i++) {
             Pair<Connection, Long> curr = minHeap.poll();
             if (curr != null) {
                 System.out.println(curr.getFirst().getNet() + ", " + curr.getFirst().getSource() + ", " + curr.getFirst().getSink() + ", " + curr.getSecond());
@@ -179,7 +203,13 @@ public class HoldFixer {
     private void fixHoldViolations() {
         computeNetsWirelength();
 
-        PriorityQueue<Pair<Connection, Long>> minHeap = new PriorityQueue<>(Comparator.comparingLong(Pair::getSecond));
+        PriorityQueue<Pair<Connection, Long>> minHeap = new PriorityQueue<>(
+                (a, b) -> {
+                    if (a.getSecond().equals(b.getSecond())) {
+                        return a.getFirst().getNet().getName().compareTo(b.getFirst().getNet().getName());
+                    }
+                    return Long.compare(a.getSecond(), b.getSecond());
+                });
 
         for (Map.Entry<Connection, Long> entry : connectionWireLengths.entrySet()) {
             if (entry.getValue() != 0) {
@@ -189,15 +219,28 @@ public class HoldFixer {
             }
         }
 
+        List<Connection> connections = new ArrayList<>();
+        int i = 0;
         while (!minHeap.isEmpty()) {
             Pair<Connection, Long> curr = minHeap.poll();
             if (curr != null) {
                 if (curr.getSecond() >= MIN_WIRE_LENGTH) {
                     break;
                 }
-                rerouteConnection(curr.getFirst());
+                connections.add(curr.getFirst());
+                i++;
+//                if (i >= 1000) {
+//                    break;
+//                }
             }
         }
+        Set<String> nets = new HashSet<>();
+        for (Connection c : connections) {
+            nets.add(c.getNet().getName());
+        }
+        System.out.println("Connection count: " + connections.size());
+        System.out.println(connections.get(0).getNet().getName());
+        rerouteConnections(connections);
     }
 
     private boolean inDifferentClockRegionColumns(SitePinInst sourcePin, SitePinInst sinkPin) {
@@ -210,6 +253,7 @@ public class HoldFixer {
      * Computes the wirelength for each net.
      */
     private void computeNetsWirelength() {
+        connectionWireLengths = new HashMap<>();
         for (Net net : design.getNets()) {
             if (net.getType() != NetType.WIRE) continue;
             if (!RouterHelper.isRoutableNetWithSourceSinks(net)) continue;
