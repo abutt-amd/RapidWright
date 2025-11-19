@@ -54,8 +54,10 @@ import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.Future;
 import java.util.function.Consumer;
+import java.util.function.Function;
 import java.util.stream.Collectors;
 
+import com.xilinx.rapidwright.rwroute.NodeStatus;
 import org.python.google.common.collect.Lists;
 
 import com.xilinx.rapidwright.design.blocks.PBlock;
@@ -816,11 +818,25 @@ public class DesignTools {
     /**
      * Demonstrates a rudimentary path expansion for finding a routing path in the
      * interconnect.
+     * See also {@link DesignTools#findRoutingPath(RouteNode, RouteNode, Function)}.
      * @param start Desired start node
      * @param end Desired end node
      * @return A list of PIPs that configure a path from start to end nodes, or null if a path could not be found.
      */
     public static List<PIP> findRoutingPath(RouteNode start, RouteNode end) {
+        return findRoutingPath(start, end, null);
+    }
+
+    /**
+     * Demonstrates a rudimentary path expansion for finding a routing path in the
+     * interconnect.
+     * @param start Desired start node
+     * @param end Desired end node
+     * @param getNodeStatus Function to determine if a given node is available for use
+     * @return A list of PIPs that configure a path from start to end nodes, or null if a path could not be found.
+     */
+    public static List<PIP> findRoutingPath(RouteNode start, RouteNode end,
+                                            Function<Node, NodeStatus> getNodeStatus) {
         PriorityQueue<RouteNode> q = new PriorityQueue<RouteNode>(16, new Comparator<RouteNode>() {
             public int compare(RouteNode i, RouteNode j) {return i.getCost() - j.getCost();}});
         q.add(start);
@@ -829,6 +845,10 @@ public class DesignTools {
 
         while (!q.isEmpty()) {
             RouteNode curr = q.remove();
+            Node currNode = Node.getNode(curr.tile, curr.wire);
+            if (getNodeStatus != null && getNodeStatus.apply(currNode) != NodeStatus.AVAILABLE) {
+                continue;
+            }
             if (curr.equals(end)) {
                 return curr.getPIPsBackToSource();
             }
