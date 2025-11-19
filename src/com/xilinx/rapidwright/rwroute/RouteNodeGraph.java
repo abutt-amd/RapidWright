@@ -716,6 +716,17 @@ public class RouteNodeGraph {
         return allowedTiles == null || allowedTiles.contains(child.getTile());
     }
 
+
+    static List<IntentCode> bannedNodesVersal = new ArrayList<>();
+    static {
+        bannedNodesVersal.add(IntentCode.NODE_VQUAD);
+        bannedNodesVersal.add(IntentCode.NODE_HQUAD);
+        bannedNodesVersal.add(IntentCode.NODE_VLONG7);
+        bannedNodesVersal.add(IntentCode.NODE_VLONG12);
+        bannedNodesVersal.add(IntentCode.NODE_HLONG6);
+        bannedNodesVersal.add(IntentCode.NODE_HLONG10);
+    }
+
     protected boolean isExcluded(RouteNode parent, Node child) {
         if (isPreserved(child)) {
             return true;
@@ -737,6 +748,10 @@ public class RouteNodeGraph {
             if ((!lutRoutethru && ic == IntentCode.NODE_IMUX) || ic == IntentCode.NODE_CLE_CTRL || ic == IntentCode.NODE_INTF_CTRL) {
                 // Disallow these site pin projections if they aren't already in the routing graph (as a potential sink)
                 return childRnode == null;
+            }
+
+            if (bannedNodesVersal.contains(ic)) {
+                return true;
             }
         } else {
             assert(design.getSeries() == Series.UltraScale || design.getSeries() == Series.UltraScalePlus);

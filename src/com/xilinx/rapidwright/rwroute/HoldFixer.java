@@ -27,10 +27,13 @@ import com.xilinx.rapidwright.design.DesignTools;
 import com.xilinx.rapidwright.design.Net;
 import com.xilinx.rapidwright.design.NetType;
 import com.xilinx.rapidwright.design.SitePinInst;
+import com.xilinx.rapidwright.device.Device;
 import com.xilinx.rapidwright.device.IntentCode;
 import com.xilinx.rapidwright.device.Node;
 import com.xilinx.rapidwright.device.PIP;
+import com.xilinx.rapidwright.device.PartNameTools;
 import com.xilinx.rapidwright.device.Site;
+import com.xilinx.rapidwright.device.Tile;
 import com.xilinx.rapidwright.device.TileTypeEnum;
 import com.xilinx.rapidwright.tests.CodePerfTracker;
 import com.xilinx.rapidwright.timing.TimingVertex;
@@ -50,6 +53,7 @@ import java.util.Map;
 import java.util.PriorityQueue;
 import java.util.Queue;
 import java.util.Set;
+import java.util.stream.Collectors;
 
 import static com.xilinx.rapidwright.design.DesignTools.getTrimmablePIPsFromPins;
 import static com.xilinx.rapidwright.rwroute.RouterHelper.computeNodeDelay;
@@ -98,6 +102,37 @@ public class HoldFixer {
         }
         System.out.println("Connections remaining to fix: " + newConnections.size());
         return newConnections;
+    }
+
+    private void rerouteNets(List<Net> nets) {
+        List<SitePinInst> pinsToRoute = new ArrayList<>();
+        for (Net net : nets) {
+            net.unroute();
+            pinsToRoute.addAll(net.getPins());
+        }
+
+        // Create the PartialRouter
+        RWRouteConfig config = new RWRouteConfig(new String[]{
+                "--fixBoundingBox",
+                // use U-turn nodes and no masking of nodes cross RCLK
+                // Pros: maximum routability
+                // Con: might result in delay optimism and a slight increase in runtime
+                "--useUTurnNodes",
+                "--nonTimingDriven"});
+        PartialRouter router = new PartialRouter(design, config, pinsToRoute);
+
+        // Initialize router object
+        router.initialize();
+
+        // Prevent router from using nodes that previously created short routes
+//            RouteNodeGraph routingGraph = router.routingGraph;
+//            for (Node nodeToBlock : avoidNodes) {
+//                RouteNode rnode = routingGraph.getOrCreate(nodeToBlock);
+//                rnode.setBaseCost(1000000000.0f);
+//            }
+
+        // Routes the design
+        router.route();
     }
 
     private void rerouteConnections(List<Connection> connections) {
@@ -154,6 +189,10 @@ public class HoldFixer {
      * Computes the wirelength and delay for each net and reports the total wirelength and critical path delay.
      */
     private void computeStatisticsAndReport() {
+        nodeTypeUsage = new HashMap<>();
+        nodeTypeLength = new HashMap<>();
+        wirelength = 0;
+        usedNodes = 0;
         computeNetsWirelength();
 
         System.out.println("\n");
@@ -172,9 +211,6 @@ public class HoldFixer {
 
         for (Map.Entry<Connection, Long> entry : connectionWireLengths.entrySet()) {
             if (entry.getValue() != 0) {
-                if (entry.getKey().getNet().getName().equals("u_systolic_array/x[9].y[11].u_tile/x[3].y[1].u_pe/east_outputs[1][2]")) {
-                    System.out.println();
-                }
                 maxHeap.add(new Pair<>(entry.getKey(), entry.getValue()));
                 if (inDifferentClockRegionColumns(entry.getKey().getSource(), entry.getKey().getSink())) {
                     minHeap.add(new Pair<>(entry.getKey(), entry.getValue()));
@@ -192,12 +228,19 @@ public class HoldFixer {
 
         System.out.println();
         System.out.println("Hold Time: ");
-        for (int i = 0; i < 5; i++) {
+//        for (int i = 0; i < 1000; i++) {
+        while (!minHeap.isEmpty()) {
             Pair<Connection, Long> curr = minHeap.poll();
             if (curr != null) {
-                System.out.println(curr.getFirst().getNet() + ", " + curr.getFirst().getSource() + ", " + curr.getFirst().getSink() + ", " + curr.getSecond());
+                if (curr.getSecond() >= MIN_WIRE_LENGTH) {
+                    break;
+                }
+//                System.out.println(curr.getFirst().getNet() + ", " + curr.getFirst().getSource() + ", " + curr.getFirst().getSink() + ", " + curr.getSecond());
+                System.out.print(curr.getFirst().getNet() + " ");
             }
         }
+//        }
+        System.out.println();
     }
 
     private void fixHoldViolations() {
@@ -234,19 +277,60 @@ public class HoldFixer {
 //                }
             }
         }
-        Set<String> nets = new HashSet<>();
+        Set<Net> nets = new HashSet<>();
         for (Connection c : connections) {
-            nets.add(c.getNet().getName());
+            nets.add(c.getNet());
         }
         System.out.println("Connection count: " + connections.size());
         System.out.println(connections.get(0).getNet().getName());
-        rerouteConnections(connections);
+        rerouteNets(new ArrayList<>(nets));
+    }
+
+    public static Tile getRealTile(Device dev, int initialRow, int initialCol) {
+//        boolean devHasUram = (PartNameTools.getPart(dev.getName()).getUltraRams() != 0);
+//        boolean devHasNoc = (PartNameTools.getPart(dev.getName())).isVersal();
+        for (int row = initialRow; row >= 0; row--) {
+            Tile t = dev.getTile(row, initialCol);
+            TileTypeEnum tt = t.getTileTypeEnum();
+            if (tt.toString().contains("CLK_REBUF_VERT_SSIT")) {
+                continue;
+            }
+            if (!tt.equals(TileTypeEnum.NULL)) {
+                return t;
+            }
+        }
+        throw new RuntimeException("Did not find base tile");
+    }
+
+    private boolean crossesWideColumn(SitePinInst sourcePin, SitePinInst sinkPin) {
+        Site source = sourcePin.getSite();
+        Site sink = sinkPin.getSite();
+        Device device = source.getDevice();
+        Tile sourceTile = source.getTile();
+        int sourceCol = source.getTile().getColumn();
+        int sourceRow = source.getTile().getRow();
+        int sinkCol = sink.getTile().getColumn();
+
+        for (int i = sourceCol; i < sinkCol; i++) {
+            Tile t = getRealTile(device, sourceRow, i);
+            if (t.getName().contains("NOC")) {
+                return true;
+            }
+            if (t.getName().contains("URAM")) {
+                return true;
+            }
+        }
+
+        return false;
     }
 
     private boolean inDifferentClockRegionColumns(SitePinInst sourcePin, SitePinInst sinkPin) {
         Site source = sourcePin.getSite();
         Site sink = sinkPin.getSite();
-        return source.getTile().getClockRegion().getColumn() != sink.getTile().getClockRegion().getColumn();
+        boolean differentClockRegionColumns = source.getTile().getClockRegion().getColumn() != sink.getTile().getClockRegion().getColumn();
+        boolean connectionFacingEast = source.getTile().getColumn() < sink.getTile().getColumn();
+        boolean rightOfClockRoot = source.getTile().getClockRegion().getColumn() > source.getDevice().getClockRegion(9, 3).getColumn();
+        return differentClockRegionColumns && connectionFacingEast && rightOfClockRoot && !crossesWideColumn(sourcePin, sinkPin);
     }
 
     /**
@@ -373,9 +457,6 @@ public class HoldFixer {
      * @param netWrapper
      */
     private void setAccumulativeWireLengthOfEachNetNode(NetWrapper netWrapper) {
-        if (netWrapper.getNet().getName().contains("u_systolic_array/x[9].y[11].u_tile/x[3].y[1].u_pe/east_outputs[1][0]")) {
-            System.out.println();
-        }
         Map<SitePinInst, Pair<Node,Long>> sourceToSinkINTNodeWireLengths =
                 getSourceToSinkINTNodeWireLengths(netWrapper.getNet());
 

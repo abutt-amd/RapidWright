@@ -1718,16 +1718,13 @@ public class RWRoute {
         prepareRouteConnection(state);
 
         RouteNode rnode;
-        RouteNode lastRNode = null;
         while ((rnode = queue.poll()) != null) {
-            lastRNode = rnode;
             state.nodesPopped++;
             if (rnode.isTarget()) {
                 break;
             }
             exploreAndExpand(state, rnode);
         }
-//        System.out.println(lastRNode.getLowerBoundTotalPathCost());
         nodesPushed.addAndGet(state.nodesPopped + queue.size());
         nodesPopped.addAndGet(state.nodesPopped);
 
@@ -2162,9 +2159,6 @@ public class RWRoute {
         if (config.isTimingDriven()) {
             newTotalPathCost += state.estDlyWeight * (deltaX * 0.32f + deltaY * 0.16f);
         }
-
-        float belowMin = Math.max(0.0f, 25.0f - newTotalPathCost);
-        newTotalPathCost += (float) (0.5 *Math.pow(belowMin, 2.0));
 
         push(state, childRnode, newPartialPathCost, newTotalPathCost, lookahead);
     }
