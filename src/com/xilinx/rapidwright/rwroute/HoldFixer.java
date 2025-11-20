@@ -26,6 +26,7 @@ import com.xilinx.rapidwright.design.Design;
 import com.xilinx.rapidwright.design.DesignTools;
 import com.xilinx.rapidwright.design.Net;
 import com.xilinx.rapidwright.design.NetType;
+import com.xilinx.rapidwright.design.SiteInst;
 import com.xilinx.rapidwright.design.SitePinInst;
 import com.xilinx.rapidwright.device.Device;
 import com.xilinx.rapidwright.device.IntentCode;
@@ -33,8 +34,11 @@ import com.xilinx.rapidwright.device.Node;
 import com.xilinx.rapidwright.device.PIP;
 import com.xilinx.rapidwright.device.PartNameTools;
 import com.xilinx.rapidwright.device.Site;
+import com.xilinx.rapidwright.device.SiteTypeEnum;
 import com.xilinx.rapidwright.device.Tile;
 import com.xilinx.rapidwright.device.TileTypeEnum;
+import com.xilinx.rapidwright.eco.ECOPlacementHelper;
+import com.xilinx.rapidwright.placer.blockplacer.Point;
 import com.xilinx.rapidwright.tests.CodePerfTracker;
 import com.xilinx.rapidwright.timing.TimingVertex;
 import com.xilinx.rapidwright.timing.delayestimator.DelayEstimatorBase;
@@ -47,6 +51,7 @@ import java.util.Collections;
 import java.util.Comparator;
 import java.util.HashMap;
 import java.util.HashSet;
+import java.util.Iterator;
 import java.util.LinkedList;
 import java.util.List;
 import java.util.Map;
@@ -72,6 +77,8 @@ public class HoldFixer {
     private Map<Connection, Long> connectionWireLengths;
     private int fixedNets;
     private int MIN_WIRE_LENGTH = 300;
+    private static final Set<SiteTypeEnum> VALID_CENTROID_SITE_TYPES =
+            new HashSet<>(Arrays.asList(SiteTypeEnum.SLICEL, SiteTypeEnum.SLICEM));
 
     public HoldFixer(Design design, RWRouteConfig config) {
         this.design = design;
@@ -104,19 +111,73 @@ public class HoldFixer {
         return newConnections;
     }
 
+    private static class RouteThru {
+        private final SiteInst siteInst;
+        private final SitePinInst inPin;
+        private final SitePinInst outPin;
+
+        RouteThru(SiteInst siteInst, SitePinInst inPin, SitePinInst outPin) {
+            this.siteInst = siteInst;
+            this.inPin = inPin;
+            this.outPin = outPin;
+        }
+    }
+
+    private static RouteThru nextAvailRouteThru(Design design, Iterator<Site> itr) {
+        while (itr.hasNext()) {
+            Site curr = itr.next();
+            SiteInst candidate = design.getSiteInstFromSite(curr);
+            if (candidate == null) {
+//                return new Pair<>(curr, Node.getNode(curr.getTile(), curr.getTileWireIndexFromPinName("A_O")));
+                SiteInst siteInst = design.createSiteInst(curr);
+                SitePinInst a6 = new SitePinInst("A6", siteInst);
+                SitePinInst ao = new SitePinInst("A_O", siteInst);
+                return new RouteThru(siteInst, a6, ao);
+            }
+        }
+        return null;
+    }
+
     private void rerouteNets(List<Net> nets) {
         List<SitePinInst> pinsToRoute = new ArrayList<>();
+        Map<Net, RouteThru> routeThruMap = new HashMap<>();
+        Map<Net, Net> newNetMap = new HashMap<>();
         for (Net net : nets) {
             net.unroute();
+            List<Point> points = new ArrayList<>();
+            for (SitePinInst pinInst : net.getPins()) {
+                Tile t = pinInst.getTile();
+                Point p = new Point(t.getColumn(), t.getRow());
+                points.add(p);
+            }
+
+            Site centroid = ECOPlacementHelper.getCentroidOfPoints(design.getDevice(), points,
+                    VALID_CENTROID_SITE_TYPES);
+            Iterator<Site> siteItr = ECOPlacementHelper.spiralOutFrom(centroid).iterator();
+            RouteThru routeThru = nextAvailRouteThru(design, siteItr);
+            if (routeThru == null) {
+                throw new RuntimeException("Failed to find valid route thru for net: " + net);
+            }
+            routeThruMap.put(net, routeThru);
+            Net newNet = design.createNet(net.getName() + "_routeThru");
+            newNet.addPin(routeThru.outPin, false);
+            newNetMap.put(net, newNet);
+            for (SitePinInst pinInst : net.getSinkPins()) {
+                net.removePin(pinInst);
+                newNet.addPin(pinInst, false);
+            }
+            net.addPin(routeThru.inPin);
             pinsToRoute.addAll(net.getPins());
+            pinsToRoute.addAll(newNet.getPins());
+            if (net.getName().contains("u_systolic_array/x[5].y[5].u_tile/x[3].y[1].u_pe/east_outputs[1][1]")) {
+                System.out.println();
+            }
         }
 
+        System.out.println("Pins to route: " + pinsToRoute.size());
         // Create the PartialRouter
         RWRouteConfig config = new RWRouteConfig(new String[]{
                 "--fixBoundingBox",
-                // use U-turn nodes and no masking of nodes cross RCLK
-                // Pros: maximum routability
-                // Con: might result in delay optimism and a slight increase in runtime
                 "--useUTurnNodes",
                 "--nonTimingDriven"});
         PartialRouter router = new PartialRouter(design, config, pinsToRoute);
@@ -133,6 +194,35 @@ public class HoldFixer {
 
         // Routes the design
         router.route();
+
+        for (Net net : nets) {
+            if (net.getName().contains("u_systolic_array/x[5].y[5].u_tile/x[3].y[1].u_pe/east_outputs[1][1]")) {
+                System.out.println();
+            }
+            RouteThru routeThru = routeThruMap.get(net);
+            SiteInst siteInst = routeThru.siteInst;
+            Tile t = siteInst.getTile();
+            int inIndex = routeThru.inPin.getConnectedWireIndex();
+            int outIndex = routeThru.outPin.getConnectedWireIndex();
+            PIP routeThruPIP = t.getPIP(inIndex, outIndex);
+            net.addPIP(routeThruPIP);
+
+            Net routeThruNet = newNetMap.get(net);
+            Set<PIP> finalPIPs = new HashSet<>();
+            finalPIPs.addAll(net.getPIPs());
+            finalPIPs.addAll(routeThruNet.getPIPs());
+
+            net.removePin(net.getSinkPins().get(0));
+            for (SitePinInst p : routeThruNet.getSinkPins()) {
+                routeThruNet.removePin(p);
+                net.addPin(p);
+            }
+
+            for (PIP pip : finalPIPs) {
+                net.addPIP(pip);
+            }
+            design.removeNet(routeThruNet);
+        }
     }
 
     private void rerouteConnections(List<Connection> connections) {
@@ -236,7 +326,7 @@ public class HoldFixer {
                     break;
                 }
 //                System.out.println(curr.getFirst().getNet() + ", " + curr.getFirst().getSource() + ", " + curr.getFirst().getSink() + ", " + curr.getSecond());
-                System.out.print(curr.getFirst().getNet() + " ");
+//                System.out.print(curr.getFirst().getNet() + " ");
             }
         }
 //        }
