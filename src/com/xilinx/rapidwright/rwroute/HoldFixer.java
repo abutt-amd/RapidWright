@@ -25,30 +25,25 @@ package com.xilinx.rapidwright.rwroute;
 import com.xilinx.rapidwright.design.Design;
 import com.xilinx.rapidwright.design.DesignTools;
 import com.xilinx.rapidwright.design.Net;
+import com.xilinx.rapidwright.design.NetTools;
 import com.xilinx.rapidwright.design.NetType;
 import com.xilinx.rapidwright.design.SiteInst;
 import com.xilinx.rapidwright.design.SitePinInst;
+import com.xilinx.rapidwright.device.ClockRegion;
 import com.xilinx.rapidwright.device.Device;
 import com.xilinx.rapidwright.device.IntentCode;
 import com.xilinx.rapidwright.device.Node;
 import com.xilinx.rapidwright.device.PIP;
-import com.xilinx.rapidwright.device.PartNameTools;
 import com.xilinx.rapidwright.device.Site;
 import com.xilinx.rapidwright.device.SiteTypeEnum;
 import com.xilinx.rapidwright.device.Tile;
 import com.xilinx.rapidwright.device.TileTypeEnum;
 import com.xilinx.rapidwright.eco.ECOPlacementHelper;
 import com.xilinx.rapidwright.placer.blockplacer.Point;
-import com.xilinx.rapidwright.tests.CodePerfTracker;
-import com.xilinx.rapidwright.timing.TimingVertex;
-import com.xilinx.rapidwright.timing.delayestimator.DelayEstimatorBase;
 import com.xilinx.rapidwright.util.Pair;
-import com.xilinx.rapidwright.util.Utils;
 
 import java.util.ArrayList;
 import java.util.Arrays;
-import java.util.Collections;
-import java.util.Comparator;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.Iterator;
@@ -58,34 +53,33 @@ import java.util.Map;
 import java.util.PriorityQueue;
 import java.util.Queue;
 import java.util.Set;
-import java.util.stream.Collectors;
 
-import static com.xilinx.rapidwright.design.DesignTools.getTrimmablePIPsFromPins;
-import static com.xilinx.rapidwright.rwroute.RouterHelper.computeNodeDelay;
-import static com.xilinx.rapidwright.rwroute.RouterHelper.getNodesOfNet;
 import static com.xilinx.rapidwright.rwroute.RouterHelper.projectInputPinToINTNode;
 
 public class HoldFixer {
-    Design design;
+    private final Design design;
+    private final ClockRegion clockRoot;
     private long wirelength;
     private int numWireNetsToRoute;
     private int numConnectionsToRoute;
     private long usedNodes;
     private Map<IntentCode, Long> nodeTypeUsage ;
     private Map<IntentCode, Long> nodeTypeLength;
-    private RouteNodeGraph routingGraph;
+    private final RouteNodeGraph routingGraph;
     private Map<Connection, Long> connectionWireLengths;
-    private int fixedNets;
-    private int MIN_WIRE_LENGTH = 300;
+    private final int MIN_WIRE_LENGTH = 300;
     private static final Set<SiteTypeEnum> VALID_CENTROID_SITE_TYPES =
             new HashSet<>(Arrays.asList(SiteTypeEnum.SLICEL, SiteTypeEnum.SLICEM));
 
-    public HoldFixer(Design design, RWRouteConfig config) {
+    public HoldFixer(Design design, String clockNetName) {
         this.design = design;
+        Node clockRootNode = NetTools.findClockRootVRoute(design.getNet(clockNetName));
+        clockRoot = clockRootNode.getTile().getClockRegion();
+        RWRouteConfig config = new RWRouteConfig(new String[0]);
+        config.setTimingDriven(false);
         routingGraph = new RouteNodeGraph(design, config);
         wirelength = 0;
         usedNodes = 0;
-        fixedNets = 0;
         nodeTypeUsage = new HashMap<>();
         nodeTypeLength = new HashMap<>();
         connectionWireLengths = new HashMap<>();
@@ -128,7 +122,6 @@ public class HoldFixer {
             Site curr = itr.next();
             SiteInst candidate = design.getSiteInstFromSite(curr);
             if (candidate == null) {
-//                return new Pair<>(curr, Node.getNode(curr.getTile(), curr.getTileWireIndexFromPinName("A_O")));
                 SiteInst siteInst = design.createSiteInst(curr);
                 SitePinInst a6 = new SitePinInst("A6", siteInst);
                 SitePinInst ao = new SitePinInst("A_O", siteInst);
@@ -142,6 +135,8 @@ public class HoldFixer {
         List<SitePinInst> pinsToRoute = new ArrayList<>();
         Map<Net, RouteThru> routeThruMap = new HashMap<>();
         Map<Net, Net> newNetMap = new HashMap<>();
+
+        // Split physical nets to ensure routeThru
         for (Net net : nets) {
             net.unroute();
             List<Point> points = new ArrayList<>();
@@ -169,9 +164,6 @@ public class HoldFixer {
             net.addPin(routeThru.inPin);
             pinsToRoute.addAll(net.getPins());
             pinsToRoute.addAll(newNet.getPins());
-            if (net.getName().contains("u_systolic_array/x[5].y[5].u_tile/x[3].y[1].u_pe/east_outputs[1][1]")) {
-                System.out.println();
-            }
         }
 
         System.out.println("Pins to route: " + pinsToRoute.size());
@@ -180,25 +172,16 @@ public class HoldFixer {
                 "--fixBoundingBox",
                 "--useUTurnNodes",
                 "--nonTimingDriven"});
-        PartialRouter router = new PartialRouter(design, config, pinsToRoute);
+        HoldFixRouter router = new HoldFixRouter(design, config, pinsToRoute);
 
         // Initialize router object
         router.initialize();
 
-        // Prevent router from using nodes that previously created short routes
-//            RouteNodeGraph routingGraph = router.routingGraph;
-//            for (Node nodeToBlock : avoidNodes) {
-//                RouteNode rnode = routingGraph.getOrCreate(nodeToBlock);
-//                rnode.setBaseCost(1000000000.0f);
-//            }
-
         // Routes the design
         router.route();
 
+        // Merge physical nets to give final routes
         for (Net net : nets) {
-            if (net.getName().contains("u_systolic_array/x[5].y[5].u_tile/x[3].y[1].u_pe/east_outputs[1][1]")) {
-                System.out.println();
-            }
             RouteThru routeThru = routeThruMap.get(net);
             SiteInst siteInst = routeThru.siteInst;
             Tile t = siteInst.getTile();
@@ -222,56 +205,6 @@ public class HoldFixer {
                 net.addPIP(pip);
             }
             design.removeNet(routeThruNet);
-        }
-    }
-
-    private void rerouteConnections(List<Connection> connections) {
-        List<Node> avoidNodes = new ArrayList<>();
-        List<Connection> currConnections = connections;
-        int connectionsLeft = Integer.MAX_VALUE;
-        List<SitePinInst> pinsToRoute = new ArrayList<>();
-        for (Connection connection : currConnections) {
-            Set<PIP> pips = getTrimmablePIPsFromPins(connection.getNet(), Collections.singletonList(connection.getSink()));
-            for (PIP pip : pips) {
-                Node endNode = pip.getEndNode();
-                if (endNode.getTile().getTileTypeEnum() == TileTypeEnum.INT
-                        && endNode.getIntentCode() != IntentCode.NODE_PINBOUNCE
-                        && endNode.getIntentCode() != IntentCode.NODE_SDQNODE) {
-                    avoidNodes.add(endNode);
-                }
-            }
-            connection.getNet().unroute();
-            pinsToRoute.add(connection.getSink());
-        }
-
-        // Create the PartialRouter
-        RWRouteConfig config = new RWRouteConfig(new String[]{
-                "--fixBoundingBox",
-                // use U-turn nodes and no masking of nodes cross RCLK
-                // Pros: maximum routability
-                // Con: might result in delay optimism and a slight increase in runtime
-                "--useUTurnNodes",
-                "--nonTimingDriven"});
-        config.setWirelengthWeight(0.6f);
-        PartialRouter router = new PartialRouter(design, config, pinsToRoute);
-
-        // Initialize router object
-        router.initialize();
-
-        // Prevent router from using nodes that previously created short routes
-//            RouteNodeGraph routingGraph = router.routingGraph;
-//            for (Node nodeToBlock : avoidNodes) {
-//                RouteNode rnode = routingGraph.getOrCreate(nodeToBlock);
-//                rnode.setBaseCost(1000000000.0f);
-//            }
-
-        // Routes the design
-        router.route();
-
-        currConnections = getConnectionsThatAreStillTooShort(currConnections);
-        Set<String> nets = new HashSet<>();
-        for (Connection c : currConnections) {
-            nets.add(c.getNet().getName());
         }
     }
 
@@ -302,35 +235,28 @@ public class HoldFixer {
         for (Map.Entry<Connection, Long> entry : connectionWireLengths.entrySet()) {
             if (entry.getValue() != 0) {
                 maxHeap.add(new Pair<>(entry.getKey(), entry.getValue()));
-                if (inDifferentClockRegionColumns(entry.getKey().getSource(), entry.getKey().getSink())) {
+                if (couldHaveHoldViolation(entry.getKey().getSource(), entry.getKey().getSink())) {
                     minHeap.add(new Pair<>(entry.getKey(), entry.getValue()));
                 }
             }
         }
 
-//        System.out.println("Setup Time: ");
-//        for (int i = 0; i < 10; i++) {
-//            Pair<Connection, Long> curr = maxHeap.poll();
-//            if (curr != null) {
-//                System.out.println(curr.getFirst().getNet() + ", " + curr.getSecond());
-//            }
-//        }
+        System.out.println("Setup Time: ");
+        for (int i = 0; i < 10; i++) {
+            Pair<Connection, Long> curr = maxHeap.poll();
+            if (curr != null) {
+                System.out.println(curr.getFirst().getNet() + ", " + curr.getSecond());
+            }
+        }
 
         System.out.println();
         System.out.println("Hold Time: ");
-//        for (int i = 0; i < 1000; i++) {
-        while (!minHeap.isEmpty()) {
+        for (int i = 0; i < 10; i++) {
             Pair<Connection, Long> curr = minHeap.poll();
             if (curr != null) {
-                if (curr.getSecond() >= MIN_WIRE_LENGTH) {
-                    break;
-                }
-//                System.out.println(curr.getFirst().getNet() + ", " + curr.getFirst().getSource() + ", " + curr.getFirst().getSink() + ", " + curr.getSecond());
-//                System.out.print(curr.getFirst().getNet() + " ");
+                System.out.println(curr.getFirst().getNet() + ", " + curr.getFirst().getSource() + ", " + curr.getFirst().getSink() + ", " + curr.getSecond());
             }
         }
-//        }
-        System.out.println();
     }
 
     private void fixHoldViolations() {
@@ -346,14 +272,13 @@ public class HoldFixer {
 
         for (Map.Entry<Connection, Long> entry : connectionWireLengths.entrySet()) {
             if (entry.getValue() != 0) {
-                if (inDifferentClockRegionColumns(entry.getKey().getSource(), entry.getKey().getSink())) {
+                if (couldHaveHoldViolation(entry.getKey().getSource(), entry.getKey().getSink())) {
                     minHeap.add(new Pair<>(entry.getKey(), entry.getValue()));
                 }
             }
         }
 
         List<Connection> connections = new ArrayList<>();
-        int i = 0;
         while (!minHeap.isEmpty()) {
             Pair<Connection, Long> curr = minHeap.poll();
             if (curr != null) {
@@ -361,10 +286,6 @@ public class HoldFixer {
                     break;
                 }
                 connections.add(curr.getFirst());
-                i++;
-//                if (i >= 1000) {
-//                    break;
-//                }
             }
         }
         Set<Net> nets = new HashSet<>();
@@ -372,13 +293,10 @@ public class HoldFixer {
             nets.add(c.getNet());
         }
         System.out.println("Connection count: " + connections.size());
-        System.out.println(connections.get(0).getNet().getName());
         rerouteNets(new ArrayList<>(nets));
     }
 
     public static Tile getRealTile(Device dev, int initialRow, int initialCol) {
-//        boolean devHasUram = (PartNameTools.getPart(dev.getName()).getUltraRams() != 0);
-//        boolean devHasNoc = (PartNameTools.getPart(dev.getName())).isVersal();
         for (int row = initialRow; row >= 0; row--) {
             Tile t = dev.getTile(row, initialCol);
             TileTypeEnum tt = t.getTileTypeEnum();
@@ -396,7 +314,6 @@ public class HoldFixer {
         Site source = sourcePin.getSite();
         Site sink = sinkPin.getSite();
         Device device = source.getDevice();
-        Tile sourceTile = source.getTile();
         int sourceCol = source.getTile().getColumn();
         int sourceRow = source.getTile().getRow();
         int sinkCol = sink.getTile().getColumn();
@@ -414,12 +331,12 @@ public class HoldFixer {
         return false;
     }
 
-    private boolean inDifferentClockRegionColumns(SitePinInst sourcePin, SitePinInst sinkPin) {
+    private boolean couldHaveHoldViolation(SitePinInst sourcePin, SitePinInst sinkPin) {
         Site source = sourcePin.getSite();
         Site sink = sinkPin.getSite();
         boolean differentClockRegionColumns = source.getTile().getClockRegion().getColumn() != sink.getTile().getClockRegion().getColumn();
         boolean connectionFacingEast = source.getTile().getColumn() < sink.getTile().getColumn();
-        boolean rightOfClockRoot = source.getTile().getClockRegion().getColumn() > source.getDevice().getClockRegion(9, 3).getColumn();
+        boolean rightOfClockRoot = source.getTile().getClockRegion().getColumn() > clockRoot.getColumn();
         return differentClockRegionColumns && connectionFacingEast && rightOfClockRoot && !crossesWideColumn(sourcePin, sinkPin);
     }
 
@@ -563,25 +480,18 @@ public class HoldFixer {
     }
 
     public static void main(String[] args) {
-        if (args.length < 2) {
-            System.out.println("USAGE:\n <input.dcp> <output.dcp>");
+        if (args.length < 3) {
+            System.out.println("USAGE:\n <input.dcp> <output.dcp> <clock net name>");
+            return;
         }
         Design design = Design.readCheckpoint(args[0]);
 
-        CodePerfTracker t = new CodePerfTracker("HoldFix");
-        t.start("make phys net names consistent");
-//        DesignTools.makePhysNetNamesConsistent(design);
-        t.stop().start("create missing site pin insts");
+        DesignTools.makePhysNetNamesConsistent(design);
         DesignTools.createMissingSitePinInsts(design);
-        t.stop().start("calculate wirelength");
-        RWRouteConfig config = new RWRouteConfig(new String[0]);
-        config.setTimingDriven(false);
-        HoldFixer holdFixer = new HoldFixer(design, config);
+        HoldFixer holdFixer = new HoldFixer(design, args[2]);
 
         holdFixer.computeStatisticsAndReport();
         holdFixer.fixHoldViolations();
-        holdFixer.computeStatisticsAndReport();
-        t.stop();
         design.writeCheckpoint(args[1]);
     }
 }
