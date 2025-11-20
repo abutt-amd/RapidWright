@@ -166,7 +166,6 @@ public class HoldFixer {
             pinsToRoute.addAll(newNet.getPins());
         }
 
-        System.out.println("Pins to route: " + pinsToRoute.size());
         // Create the PartialRouter
         RWRouteConfig config = new RWRouteConfig(new String[]{
                 "--fixBoundingBox",
