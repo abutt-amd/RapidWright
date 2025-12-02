@@ -343,9 +343,10 @@ public class Utils{
             TileTypeEnum.INT_L,
             //TileTypeEnum.INT_L_SLV,
             //TileTypeEnum.INT_L_SLV_FLY,
-            TileTypeEnum.INT_R
+            TileTypeEnum.INT_R,
             //TileTypeEnum.INT_R_SLV,
             //TileTypeEnum.INT_R_SLV_FLY,
+            TileTypeEnum.SLL                // Versal
         );
 
         urams = EnumSet.of(
@@ -374,7 +375,8 @@ public class Utils{
 
         lockedSiteTypes = EnumSet.of(
             SiteTypeEnum.CONFIG_SITE,
-            SiteTypeEnum.BUFG
+            SiteTypeEnum.BUFG,
+            SiteTypeEnum.BUFGCE 
         );
 
         sliceTypes = EnumSet.of(

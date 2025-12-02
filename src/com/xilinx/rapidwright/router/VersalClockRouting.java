@@ -288,6 +288,7 @@ public class VersalClockRouting {
         }
 
         VersalClockTree clkTree = getVersalClockTree(device, minY, maxY);
+        assert (clkTree != null);
         if (clkTree == null) {
             System.err.println("ERROR: No clock tree found for " + device + " Y" + minY + "-Y" + maxY
                     + " while routing clock " + clk + ", skew will be suboptimal.");
@@ -428,7 +429,8 @@ public class VersalClockRouting {
      * @param distLines A map of target clock regions and their respective horizontal distribution lines
      * @param lcbTargets The target LCB nodes to route the clock
      */
-    public static void routeDistributionToLCBs(Net clk, Map<ClockRegion, Node> distLines, Set<Node> lcbTargets, Function<Node, NodeStatus> getNodeStatus) {
+    public static void routeDistributionToLCBs(Net clk, Map<ClockRegion, Node> distLines,
+            Map<Node, List<SitePinInst>> lcbTargets, Function<Node, NodeStatus> getNodeStatus) {
         Map<ClockRegion, Set<NodeWithPrevAndCost>> startingPoints = getStartingPoints(distLines);
         routeToLCBs(clk, startingPoints, lcbTargets, getNodeStatus);
     }
@@ -444,12 +446,14 @@ public class VersalClockRouting {
         return startingPoints;
     }
 
-    public static void routeToLCBs(Net clk, Map<ClockRegion, Set<NodeWithPrevAndCost>> startingPoints, Set<Node> lcbTargets, Function<Node, NodeStatus> getNodeStatus) {
+    public static void routeToLCBs(Net clk, Map<ClockRegion, Set<NodeWithPrevAndCost>> startingPoints,
+            Map<Node, List<SitePinInst>> lcbTargets, Function<Node, NodeStatus> getNodeStatus) {
         Queue<NodeWithPrevAndCost> q = new PriorityQueue<>();
         Set<PIP> allPIPs = new HashSet<>();
         Set<Node> visited = new HashSet<>();
 
-        nextLCB: for (Node lcb : lcbTargets) {
+        nextLCB: for (Entry<Node, List<SitePinInst>> e : lcbTargets.entrySet()) {
+            Node lcb = e.getKey();
             q.clear();
             visited.clear();
             Tile lcbTile = lcb.getTile();
@@ -472,6 +476,10 @@ public class VersalClockRouting {
                     Set<NodeWithPrevAndCost> s = startingPoints.get(currCR);
                     for (Node n : path) {
                         s.add(new NodeWithPrevAndCost(n));
+                    }
+
+                    for (SitePinInst sink : e.getValue()) {
+                        sink.setRouted(true);
                     }
 
                     continue nextLCB;

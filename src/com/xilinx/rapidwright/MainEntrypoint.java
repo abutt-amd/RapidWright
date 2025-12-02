@@ -37,6 +37,7 @@ import com.xilinx.rapidwright.design.blocks.ImplGuide;
 import com.xilinx.rapidwright.design.blocks.PBlock;
 import com.xilinx.rapidwright.design.blocks.PBlockGenerator;
 import com.xilinx.rapidwright.design.merge.MergeDesigns;
+import com.xilinx.rapidwright.design.tools.ArrayBuilder;
 import com.xilinx.rapidwright.design.tools.CopyImplementation;
 import com.xilinx.rapidwright.design.tools.DesignObfuscator;
 import com.xilinx.rapidwright.design.tools.LUTTools;
@@ -54,6 +55,7 @@ import com.xilinx.rapidwright.edif.EDIFNetlist;
 import com.xilinx.rapidwright.edif.EDIFParser;
 import com.xilinx.rapidwright.edif.EDIFPropertyValue;
 import com.xilinx.rapidwright.edif.EDIFTools;
+import com.xilinx.rapidwright.edif.compare.EDIFNetlistComparator;
 import com.xilinx.rapidwright.examples.AddSubGenerator;
 import com.xilinx.rapidwright.examples.CopyMMCMCell;
 import com.xilinx.rapidwright.examples.CountRoutedNets;
@@ -133,6 +135,7 @@ public class MainEntrypoint {
 
     static {
         addFunction("AddSubGenerator", AddSubGenerator::main);
+        addFunction("ArrayBuilder", ArrayBuilder::main);
         addFunction("BlockCreator", BlockCreator::main);
         addFunction("BlockStitcher", BlockStitcher::main);
         addFunction("BlockUpdater", BlockUpdater::main);
@@ -153,6 +156,7 @@ public class MainEntrypoint {
         addFunction("DeviceLoader", DeviceLoader::main);
         addFunction("DeviceResourcesExample", DeviceResourcesExample::main);
         addFunction("EDIFNetlist", EDIFNetlist::main);
+        addFunction("EDIFNetlistComparator", EDIFNetlistComparator::main);
         addFunction("EDIFParser", EDIFParser::main);
         addFunction("EDIFPropertyValue", EDIFPropertyValue::main);
         addFunction("EDIFToLogicalNetlist", EdifToLogicalNetlist::main);
