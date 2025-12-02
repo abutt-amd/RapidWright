@@ -728,7 +728,6 @@ public class RouteNodeGraph {
         return allowedTiles == null || allowedTiles.contains(child.getTile());
     }
 
-
     protected boolean isExcluded(RouteNode parent, Node child) {
         if (isPreserved(child)) {
             return true;

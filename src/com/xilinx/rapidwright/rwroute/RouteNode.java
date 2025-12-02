@@ -110,10 +110,6 @@ public class RouteNode extends Node implements Comparable<RouteNode> {
         return (int) Math.signum(this.lowerBoundTotalPathCost - that.lowerBoundTotalPathCost);
     }
 
-    public void setBaseCost(float cost) {
-        baseCost = cost;
-    }
-
     private void setBaseCost(RouteNodeGraph routingGraph) {
         final Series series = routingGraph.design.getSeries();
         baseCost = 0.4f;
