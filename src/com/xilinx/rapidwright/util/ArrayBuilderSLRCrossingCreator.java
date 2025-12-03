@@ -24,6 +24,7 @@ package com.xilinx.rapidwright.util;
 
 import com.xilinx.rapidwright.design.Design;
 import com.xilinx.rapidwright.design.Module;
+import com.xilinx.rapidwright.design.ModuleInst;
 import com.xilinx.rapidwright.design.blocks.PBlock;
 import com.xilinx.rapidwright.design.tools.ArrayBuilder;
 import com.xilinx.rapidwright.design.xdc.ConstraintTools;
@@ -105,8 +106,16 @@ public class ArrayBuilderSLRCrossingCreator {
 
         PBlock pblock = pblocks.values().iterator().next();
 
-        Module module = new Module(inputDesign);
+        List<String> clockNets = ConstraintTools.getClockNetsFromXDC(inputDesign);
 
+        assert(clockNets.size() == 1);
+
+        ArrayBuilder.removeBUFGs(inputDesign);
+
+        Module module = new Module(inputDesign, false);
+
+        module.getNet(clockNets.get(0)).unroute();
+        module.setPBlock(pblock.toString());
         module.calculateAllValidPlacements(inputDesign.getDevice());
         List<List<Site>> validPlacementGrid = ArrayBuilder.getValidPlacementGrid(module);
 
@@ -122,7 +131,19 @@ public class ArrayBuilderSLRCrossingCreator {
             lastAnchorInSLR = anchor;
         }
 
+        Design slrCrossing = new Design("slr_crossing", inputDesign.getPartName());
 
-        System.out.println();
+        // Merge encrypted cells
+        List<String> encryptedCells = module.getNetlist().getEncryptedCells();
+        if (!encryptedCells.isEmpty()) {
+            System.out.println("Encrypted cells merged");
+            slrCrossing.getNetlist().addEncryptedCells(encryptedCells);
+        }
+
+        ModuleInst topInst = slrCrossing.createModuleInst("top_inst", module);
+
+        topInst.place(lastAnchorInSLR);
+
+        slrCrossing.writeCheckpoint(outputPath);
     }
 }
