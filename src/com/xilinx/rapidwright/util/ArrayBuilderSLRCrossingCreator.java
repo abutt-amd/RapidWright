@@ -23,8 +23,12 @@
 package com.xilinx.rapidwright.util;
 
 import com.xilinx.rapidwright.design.Design;
+import com.xilinx.rapidwright.design.Module;
 import com.xilinx.rapidwright.design.blocks.PBlock;
+import com.xilinx.rapidwright.design.tools.ArrayBuilder;
 import com.xilinx.rapidwright.design.xdc.ConstraintTools;
+import com.xilinx.rapidwright.device.SLR;
+import com.xilinx.rapidwright.device.Site;
 import joptsimple.OptionParser;
 import joptsimple.OptionSet;
 
@@ -85,6 +89,10 @@ public class ArrayBuilderSLRCrossingCreator {
         Path inputFile = Paths.get(kernelDesignPath);
         Design inputDesign = Design.readCheckpoint(inputFile);
 
+        if (!inputDesign.getDevice().getName().equals("xcv80")) {
+            System.out.println("SLRCrossing creator currently only tested for xcv80");
+        }
+
         Map<String, PBlock> pblocks = ConstraintTools.getPBlocksFromXDC(inputDesign);
         if (pblocks.isEmpty()) {
             throw new RuntimeException("Provided kernel design does not contain a PBlock");
@@ -95,6 +103,26 @@ public class ArrayBuilderSLRCrossingCreator {
                     + pblocks.size());
         }
 
+        PBlock pblock = pblocks.values().iterator().next();
 
+        Module module = new Module(inputDesign);
+
+        module.calculateAllValidPlacements(inputDesign.getDevice());
+        List<List<Site>> validPlacementGrid = ArrayBuilder.getValidPlacementGrid(module);
+
+        Site lastAnchorInSLR = null;
+
+        SLR firstSLR = validPlacementGrid.get(0).get(0).getTile().getSLR();
+
+        for (List<Site> sites : validPlacementGrid) {
+            Site anchor = sites.get(0);
+            if (anchor.getTile().getSLR() != firstSLR) {
+                break;
+            }
+            lastAnchorInSLR = anchor;
+        }
+
+
+        System.out.println();
     }
 }
