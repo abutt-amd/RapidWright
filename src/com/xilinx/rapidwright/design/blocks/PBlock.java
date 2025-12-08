@@ -132,6 +132,14 @@ public class PBlock extends ArrayList<PBlockRange> {
         else slices.addAll(slicems == null ? Collections.emptyList() : slicems);
         PBlockRange sliceRange = createPBlockRange(dev, slices);
         if (sliceRange != null) add(sliceRange);
+
+        // IRI_QUADs are a special case
+        List<Site> iriQuadOdds = typeSets.remove(SiteTypeEnum.IRI_QUAD_ODD);
+        List<Site> iriQuadEvens = typeSets.remove(SiteTypeEnum.IRI_QUAD_EVEN);
+        if (iriQuadOdds == null) iriQuadOdds = iriQuadEvens == null ? Collections.emptyList() : iriQuadEvens;
+        else iriQuadOdds.addAll(iriQuadEvens == null ? Collections.emptyList() : iriQuadEvens);
+        PBlockRange iriQuadRange = createPBlockRange(dev, iriQuadOdds);
+        if (iriQuadRange != null) add(iriQuadRange);
         // Rest of site types
         for (Entry<SiteTypeEnum,ArrayList<Site>> e : typeSets.entrySet()) {
             add(createPBlockRange(dev, e.getValue()));
@@ -486,14 +494,16 @@ public class PBlock extends ArrayList<PBlockRange> {
                 for (PBlockRange pbr : this) {
                     int y = 0;
                     Site left = pbr.getLowerLeftSite().getNeighborSite(0, y);
+                    int siteIndex = left.getSiteIndexInTile();
                     int target = left.getTile().getRow() + dy;
-                    while (left.getTile().getRow() < target) {
+                    while (left.getTile().getRow() < target || left.getSiteIndexInTile() != siteIndex) {
                         y--;
                         left = pbr.getLowerLeftSite().getNeighborSite(0, y);
-                        if (left.getTile().getRow() <= target) {
+                        if (left.getTile().getRow() <= target || left.getSiteIndexInTile() != siteIndex) {
                             hasMoved = true;
                         }
                     }
+//                    originalLeft.getCorrespondingSite(originalLeft.getSiteTypeEnum(), left.getTile())
                     if (hasMoved) {
                         pbr.setLowerLeft(left);
                         Site otherCorner = pbr.getUpperRightSite().getNeighborSite(0, y);

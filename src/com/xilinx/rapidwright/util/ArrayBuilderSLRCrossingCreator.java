@@ -22,6 +22,7 @@
  */
 package com.xilinx.rapidwright.util;
 
+import com.xilinx.rapidwright.design.ConstraintGroup;
 import com.xilinx.rapidwright.design.Design;
 import com.xilinx.rapidwright.design.Module;
 import com.xilinx.rapidwright.design.ModuleInst;
@@ -120,12 +121,14 @@ public class ArrayBuilderSLRCrossingCreator {
         List<List<Site>> validPlacementGrid = ArrayBuilder.getValidPlacementGrid(module);
 
         Site lastAnchorInSLR = null;
+        Site firstAnchorInOtherSLR = null;
 
         SLR firstSLR = validPlacementGrid.get(0).get(0).getTile().getSLR();
 
         for (List<Site> sites : validPlacementGrid) {
             Site anchor = sites.get(0);
             if (anchor.getTile().getSLR() != firstSLR) {
+                firstAnchorInOtherSLR = anchor;
                 break;
             }
             lastAnchorInSLR = anchor;
@@ -141,9 +144,35 @@ public class ArrayBuilderSLRCrossingCreator {
         }
 
         ModuleInst topInst = slrCrossing.createModuleInst("top_inst", module);
+//        topInst.place(lastAnchorInSLR);
 
-        topInst.place(lastAnchorInSLR);
+        assert lastAnchorInSLR != null;
+        int pBlockHeight = pblock.getBottomLeftTile().getRow() - pblock.getTopLeftTile().getRow();
+        int topOffsetY = lastAnchorInSLR.getTile().getRow() - module.getAnchor().getTile().getRow();
 
+        PBlock topPBlock = new PBlock(inputDesign.getDevice(), pblock.getAllSites(null));
+        topPBlock.movePBlock(0, topOffsetY);
+        topPBlock.setContainRouting(true);
+        topPBlock.setIsSoft(false);
+        topPBlock.setName("pblock0");
+        for (String tclCmd : topPBlock.getTclConstraints()) {
+            slrCrossing.addXDCConstraint(ConstraintGroup.LATE, tclCmd);
+        }
+
+        assert firstAnchorInOtherSLR != null;
+        int bottomOffsetY = firstAnchorInOtherSLR.getTile().getRow() - module.getAnchor().getTile().getRow();
+
+//        PBlock bottomPBlock = new PBlock(inputDesign.getDevice(), pblock.getAllSites(null));
+//        bottomPBlock.movePBlock(0, bottomOffsetY);
+//        bottomPBlock.setContainRouting(true);
+//        bottomPBlock.setIsSoft(false);
+//        bottomPBlock.setName("pblock1");
+//        for (String tclCmd : bottomPBlock.getTclConstraints()) {
+//            slrCrossing.addXDCConstraint(ConstraintGroup.LATE, tclCmd);
+//        }
+
+        slrCrossing.getNetlist().consolidateAllToWorkLibrary();
+        slrCrossing.flattenDesign();
         slrCrossing.writeCheckpoint(outputPath);
     }
 }
