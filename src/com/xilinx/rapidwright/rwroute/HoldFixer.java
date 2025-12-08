@@ -63,7 +63,7 @@ public class HoldFixer {
     private int numWireNetsToRoute;
     private int numConnectionsToRoute;
     private long usedNodes;
-    private Map<IntentCode, Long> nodeTypeUsage ;
+    private Map<IntentCode, Long> nodeTypeUsage;
     private Map<IntentCode, Long> nodeTypeLength;
     private final RouteNodeGraph routingGraph;
     private Map<Connection, Long> connectionWireLengths;
@@ -139,31 +139,35 @@ public class HoldFixer {
         // Split physical nets to ensure routeThru
         for (Net net : nets) {
             net.unroute();
-            List<Point> points = new ArrayList<>();
-            for (SitePinInst pinInst : net.getPins()) {
-                Tile t = pinInst.getTile();
-                Point p = new Point(t.getColumn(), t.getRow());
-                points.add(p);
-            }
+            if (!isVerticalCRConnection(net.getSource(), net.getSinkPins().get(0))) {
+                List<Point> points = new ArrayList<>();
+                for (SitePinInst pinInst : net.getPins()) {
+                    Tile t = pinInst.getTile();
+                    Point p = new Point(t.getColumn(), t.getRow());
+                    points.add(p);
+                }
 
-            Site centroid = ECOPlacementHelper.getCentroidOfPoints(design.getDevice(), points,
-                    VALID_CENTROID_SITE_TYPES);
-            Iterator<Site> siteItr = ECOPlacementHelper.spiralOutFrom(centroid).iterator();
-            RouteThru routeThru = nextAvailRouteThru(design, siteItr);
-            if (routeThru == null) {
-                throw new RuntimeException("Failed to find valid route thru for net: " + net);
+                Site centroid = ECOPlacementHelper.getCentroidOfPoints(design.getDevice(), points,
+                        VALID_CENTROID_SITE_TYPES);
+                Iterator<Site> siteItr = ECOPlacementHelper.spiralOutFrom(centroid).iterator();
+                RouteThru routeThru = nextAvailRouteThru(design, siteItr);
+                if (routeThru == null) {
+                    throw new RuntimeException("Failed to find valid route thru for net: " + net);
+                }
+                routeThruMap.put(net, routeThru);
+                Net newNet = design.createNet(net.getName() + "_routeThru");
+                newNet.addPin(routeThru.outPin, false);
+                newNetMap.put(net, newNet);
+                for (SitePinInst pinInst : net.getSinkPins()) {
+                    net.removePin(pinInst);
+                    newNet.addPin(pinInst, false);
+                }
+                net.addPin(routeThru.inPin);
+                pinsToRoute.addAll(net.getPins());
+                pinsToRoute.addAll(newNet.getPins());
+            } else {
+                pinsToRoute.addAll(net.getPins());
             }
-            routeThruMap.put(net, routeThru);
-            Net newNet = design.createNet(net.getName() + "_routeThru");
-            newNet.addPin(routeThru.outPin, false);
-            newNetMap.put(net, newNet);
-            for (SitePinInst pinInst : net.getSinkPins()) {
-                net.removePin(pinInst);
-                newNet.addPin(pinInst, false);
-            }
-            net.addPin(routeThru.inPin);
-            pinsToRoute.addAll(net.getPins());
-            pinsToRoute.addAll(newNet.getPins());
         }
 
         // Create the PartialRouter
@@ -181,29 +185,31 @@ public class HoldFixer {
 
         // Merge physical nets to give final routes
         for (Net net : nets) {
-            RouteThru routeThru = routeThruMap.get(net);
-            SiteInst siteInst = routeThru.siteInst;
-            Tile t = siteInst.getTile();
-            int inIndex = routeThru.inPin.getConnectedWireIndex();
-            int outIndex = routeThru.outPin.getConnectedWireIndex();
-            PIP routeThruPIP = t.getPIP(inIndex, outIndex);
-            net.addPIP(routeThruPIP);
+            if (!isVerticalCRConnection(net.getSource(), net.getSinkPins().get(0))) {
+                RouteThru routeThru = routeThruMap.get(net);
+                SiteInst siteInst = routeThru.siteInst;
+                Tile t = siteInst.getTile();
+                int inIndex = routeThru.inPin.getConnectedWireIndex();
+                int outIndex = routeThru.outPin.getConnectedWireIndex();
+                PIP routeThruPIP = t.getPIP(inIndex, outIndex);
+                net.addPIP(routeThruPIP);
 
-            Net routeThruNet = newNetMap.get(net);
-            Set<PIP> finalPIPs = new HashSet<>();
-            finalPIPs.addAll(net.getPIPs());
-            finalPIPs.addAll(routeThruNet.getPIPs());
+                Net routeThruNet = newNetMap.get(net);
+                Set<PIP> finalPIPs = new HashSet<>();
+                finalPIPs.addAll(net.getPIPs());
+                finalPIPs.addAll(routeThruNet.getPIPs());
 
-            net.removePin(net.getSinkPins().get(0));
-            for (SitePinInst p : routeThruNet.getSinkPins()) {
-                routeThruNet.removePin(p);
-                net.addPin(p);
+                net.removePin(net.getSinkPins().get(0));
+                for (SitePinInst p : routeThruNet.getSinkPins()) {
+                    routeThruNet.removePin(p);
+                    net.addPin(p);
+                }
+
+                for (PIP pip : finalPIPs) {
+                    net.addPIP(pip);
+                }
+                design.removeNet(routeThruNet);
             }
-
-            for (PIP pip : finalPIPs) {
-                net.addPIP(pip);
-            }
-            design.removeNet(routeThruNet);
         }
     }
 
@@ -253,7 +259,8 @@ public class HoldFixer {
         for (int i = 0; i < 10; i++) {
             Pair<Connection, Long> curr = minHeap.poll();
             if (curr != null) {
-                System.out.println(curr.getFirst().getNet() + ", " + curr.getFirst().getSource() + ", " + curr.getFirst().getSink() + ", " + curr.getSecond());
+                System.out.println(curr.getFirst().getNet() + ", " + curr.getFirst()
+                        .getSource() + ", " + curr.getFirst().getSink() + ", " + curr.getSecond());
             }
         }
     }
@@ -330,13 +337,28 @@ public class HoldFixer {
         return false;
     }
 
+    private boolean isVerticalCRConnection(SitePinInst sourcePin, SitePinInst sinkPin) {
+        Site source = sourcePin.getSite();
+        Site sink = sinkPin.getSite();
+        ClockRegion sourceCR = source.getTile().getClockRegion();
+        ClockRegion sinkCR = sink.getTile().getClockRegion();
+        boolean differentClockRegionColumns = sourceCR.getColumn() != sinkCR.getColumn();
+        boolean differentClockRegionRows = sourceCR.getRow() != sinkCR.getRow();
+        return differentClockRegionRows && !differentClockRegionColumns;
+    }
+
     private boolean couldHaveHoldViolation(SitePinInst sourcePin, SitePinInst sinkPin) {
         Site source = sourcePin.getSite();
         Site sink = sinkPin.getSite();
-        boolean differentClockRegionColumns = source.getTile().getClockRegion().getColumn() != sink.getTile().getClockRegion().getColumn();
+        ClockRegion sourceCR = source.getTile().getClockRegion();
+        ClockRegion sinkCR = sink.getTile().getClockRegion();
+        boolean differentClockRegionColumns = sourceCR.getColumn() != sinkCR.getColumn();
         boolean connectionFacingEast = source.getTile().getColumn() < sink.getTile().getColumn();
         boolean rightOfClockRoot = source.getTile().getClockRegion().getColumn() > clockRoot.getColumn();
-        return differentClockRegionColumns && connectionFacingEast && rightOfClockRoot && !crossesWideColumn(sourcePin, sinkPin);
+        boolean horizontalHoldCandidate = differentClockRegionColumns && connectionFacingEast && rightOfClockRoot
+                && !crossesWideColumn(sourcePin, sinkPin);
+        boolean verticalHoldCandidate = isVerticalCRConnection(sourcePin, sinkPin);
+        return horizontalHoldCandidate || verticalHoldCandidate;
     }
 
     /**
@@ -365,6 +387,7 @@ public class HoldFixer {
 
     /**
      * Creates a {@link NetWrapper} Object that consists of a list of {@link Connection} Objects, based on a net.
+     *
      * @param net
      * @return
      */
@@ -372,7 +395,7 @@ public class HoldFixer {
         NetWrapper netWrapper = new NetWrapper(numWireNetsToRoute++, net);
         SitePinInst source = net.getSource();
         Node sourceINTNode = null;
-        for (SitePinInst sink:net.getSinkPins()) {
+        for (SitePinInst sink : net.getSinkPins()) {
             if (RouterHelper.isExternalConnectionToCout(source, sink)) {
                 source = net.getAlternateSource();
                 if (source == null) {
@@ -406,10 +429,11 @@ public class HoldFixer {
 
     /**
      * Gets a map containing net wirelength for each sink pin paired with an INT tile node of a routed net.
+     *
      * @param net The target routed net.
      * @return The map containing net wirelength for each sink pin paired with an INT tile node of a routed net.
      */
-    public Map<SitePinInst, Pair<Node,Long>> getSourceToSinkINTNodeWireLengths(Net net) {
+    public Map<SitePinInst, Pair<Node, Long>> getSourceToSinkINTNodeWireLengths(Net net) {
         Map<Node, Long> wirelengthMap = new HashMap<>();
         Node sourceNode = net.getSource().getConnectedNode();
         Set<PIP> pips = new HashSet<>(net.getPIPs());
@@ -434,7 +458,7 @@ public class HoldFixer {
             }
         }
 
-        Map<SitePinInst, Pair<Node,Long>> sinkNodeWirelength = new HashMap<>();
+        Map<SitePinInst, Pair<Node, Long>> sinkNodeWirelength = new HashMap<>();
         for (SitePinInst sink : net.getSinkPins()) {
             Node sinkNode = sink.getConnectedNode();
             if (sinkNode.getTile().getTileTypeEnum() != TileTypeEnum.INT) {
@@ -448,7 +472,7 @@ public class HoldFixer {
 
             if (wirelengthMap.containsKey(sinkNode)) {
                 long routeWirelength = wirelengthMap.get(sinkNode).longValue();
-                sinkNodeWirelength.put(sink, new Pair<>(sinkNode,routeWirelength));
+                sinkNodeWirelength.put(sink, new Pair<>(sinkNode, routeWirelength));
             } else {
                 System.out.println("WARNING: net " + net.getName() + " not fully routed");
             }
@@ -460,17 +484,18 @@ public class HoldFixer {
     /**
      * Using PIPs to calculate and set accumulative delay for each used node of a routed net that is represented by a {@link NetWrapper} Object.
      * The delay of each node is the total route delay from the source to the node (inclusive).
+     *
      * @param netWrapper
      */
     private void setAccumulativeWireLengthOfEachNetNode(NetWrapper netWrapper) {
-        Map<SitePinInst, Pair<Node,Long>> sourceToSinkINTNodeWireLengths =
+        Map<SitePinInst, Pair<Node, Long>> sourceToSinkINTNodeWireLengths =
                 getSourceToSinkINTNodeWireLengths(netWrapper.getNet());
 
         for (Connection connection : netWrapper.getConnections()) {
             if (connection.isDirect()) {
                 continue;
             }
-            Pair<Node,Long> sinkINTNodeWireLengths = sourceToSinkINTNodeWireLengths.get(connection.getSink());
+            Pair<Node, Long> sinkINTNodeWireLengths = sourceToSinkINTNodeWireLengths.get(connection.getSink());
             if (sinkINTNodeWireLengths != null) {
                 long connectionWirelength = sinkINTNodeWireLengths.getSecond();
                 connectionWireLengths.put(connection, connectionWirelength);
