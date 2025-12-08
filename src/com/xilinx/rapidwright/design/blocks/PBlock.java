@@ -452,11 +452,12 @@ public class PBlock extends ArrayList<PBlockRange> {
                 for (PBlockRange pbr : this) {
                     int x = 0;
                     Site right = pbr.getUpperRightSite().getNeighborSite(x, 0);
+                    int siteIndex = right.getSiteIndexInTile();
                     int target = right.getTile().getColumn() + dx;
-                    while (right.getTile().getColumn() < target) {
+                    while (right.getTile().getColumn() < target || right.getSiteIndexInTile() != siteIndex) {
                         x++;
                         right = pbr.getUpperRightSite().getNeighborSite(x, 0);
-                        if (right.getTile().getColumn() <= target) {
+                        if (right.getTile().getColumn() <= target || right.getSiteIndexInTile() != siteIndex) {
                             hasMoved = true;
                         }
                     }
@@ -471,11 +472,12 @@ public class PBlock extends ArrayList<PBlockRange> {
                 for (PBlockRange pbr : this) {
                     int x = 0;
                     Site left = pbr.getLowerLeftSite().getNeighborSite(x, 0);
+                    int siteIndex = left.getSiteIndexInTile();
                     int target = left.getTile().getColumn() + dx;
-                    while (left.getTile().getColumn() > target) {
+                    while (left.getTile().getColumn() > target || left.getSiteIndexInTile() != siteIndex) {
                         x--;
                         left = pbr.getLowerLeftSite().getNeighborSite(x, 0);
-                        if (left.getTile().getColumn() >= target) {
+                        if (left.getTile().getColumn() >= target || left.getSiteIndexInTile() != siteIndex) {
                             hasMoved = true;
                         }
                     }
@@ -515,11 +517,12 @@ public class PBlock extends ArrayList<PBlockRange> {
                 for (PBlockRange pbr : this) {
                     int y = 0;
                     Site right = pbr.getUpperRightSite().getNeighborSite(0, y);
+                    int siteIndex = right.getSiteIndexInTile();
                     int target = right.getTile().getRow() + dy;
-                    while (right.getTile().getRow() > target) {
+                    while (right.getTile().getRow() > target || right.getSiteIndexInTile() != siteIndex) {
                         y++;
                         right = pbr.getUpperRightSite().getNeighborSite(0, y);
-                        if (right.getTile().getRow() >= target) {
+                        if (right.getTile().getRow() >= target || right.getSiteIndexInTile() != siteIndex) {
                             hasMoved = true;
                         }
                     }
