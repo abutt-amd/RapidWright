@@ -162,14 +162,14 @@ public class ArrayBuilderSLRCrossingCreator {
         assert firstAnchorInOtherSLR != null;
         int bottomOffsetY = firstAnchorInOtherSLR.getTile().getRow() - module.getAnchor().getTile().getRow();
 
-//        PBlock bottomPBlock = new PBlock(inputDesign.getDevice(), pblock.getAllSites(null));
-//        bottomPBlock.movePBlock(0, bottomOffsetY);
-//        bottomPBlock.setContainRouting(true);
-//        bottomPBlock.setIsSoft(false);
-//        bottomPBlock.setName("pblock1");
-//        for (String tclCmd : bottomPBlock.getTclConstraints()) {
-//            slrCrossing.addXDCConstraint(ConstraintGroup.LATE, tclCmd);
-//        }
+        PBlock bottomPBlock = new PBlock(inputDesign.getDevice(), pblock.getAllSites(null));
+        bottomPBlock.movePBlock(0, bottomOffsetY);
+        bottomPBlock.setContainRouting(true);
+        bottomPBlock.setIsSoft(false);
+        bottomPBlock.setName("pblock1");
+        for (String tclCmd : bottomPBlock.getTclConstraints()) {
+            slrCrossing.addXDCConstraint(ConstraintGroup.LATE, tclCmd);
+        }
 
         slrCrossing.getNetlist().consolidateAllToWorkLibrary();
         slrCrossing.flattenDesign();
