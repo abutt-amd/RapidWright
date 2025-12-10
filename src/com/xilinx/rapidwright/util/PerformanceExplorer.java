@@ -109,6 +109,8 @@ public class PerformanceExplorer {
 
     private boolean ensureExternalRoutability;
 
+    private boolean lockPlacement;
+
     private String externalRoutabilitySideFile;
 
     Map<EDIFPort, PBlockSide> externalRoutabilitySideMap = null;
@@ -296,6 +298,14 @@ public class PerformanceExplorer {
         this.ensureExternalRoutability = ensureExternalRoutability;
     }
 
+    public boolean lockPlacement() {
+        return lockPlacement;
+    }
+
+    public void setLockPlacement(boolean lockPlacement) {
+        this.lockPlacement = lockPlacement;
+    }
+
     public String getExternalRoutabilitySideFile() {
         return externalRoutabilitySideFile;
     }
@@ -338,11 +348,11 @@ public class PerformanceExplorer {
                 lines.add("set_property CONTAIN_ROUTING 1 [get_pblocks "+ pblockName+"]");
             }
         }
-        if (ensureExternalRoutability()) {
+        if (lockPlacement()) {
             lines.add("lock_design -level placement");
         }
         lines.add("opt_design");
-        if (!ensureExternalRoutability()) {
+        if (!lockPlacement()) {
             lines.add("place_design -unplace");
         }
         lines.add("place_design -directive " + p.name());
@@ -655,6 +665,7 @@ public class PerformanceExplorer {
         pe.setGetBestPerPBlock(opts.has(COLLECT_RESULTS_OPT));
         pe.setReusePreviousResults(opts.has(REUSE_PREVIOUS_RESULTS));
         pe.setEnsureExternalRoutability(opts.has(ENSURE_EXT_ROUTABILITY));
+        pe.setLockPlacement(opts.has(ENSURE_EXT_ROUTABILITY));
         if (opts.hasArgument(ENSURE_EXT_ROUTABILITY)) {
             pe.setExternalRoutabilitySideFile((String) opts.valueOf(ENSURE_EXT_ROUTABILITY));
         }
