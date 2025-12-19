@@ -28,6 +28,7 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.util.ArrayList;
+import java.util.Collection;
 import java.util.Collections;
 import java.util.Comparator;
 import java.util.HashMap;
@@ -62,6 +63,7 @@ import com.xilinx.rapidwright.design.blocks.PBlockSide;
 import com.xilinx.rapidwright.device.BEL;
 import com.xilinx.rapidwright.device.ClockRegion;
 import com.xilinx.rapidwright.device.Device;
+import com.xilinx.rapidwright.device.SLR;
 import com.xilinx.rapidwright.device.Series;
 import com.xilinx.rapidwright.device.Site;
 import com.xilinx.rapidwright.device.Tile;
@@ -75,6 +77,7 @@ import com.xilinx.rapidwright.edif.EDIFPort;
 import com.xilinx.rapidwright.edif.EDIFPortInst;
 import com.xilinx.rapidwright.edif.EDIFTools;
 import com.xilinx.rapidwright.edif.EDIFValueType;
+import com.xilinx.rapidwright.gui.NetlistBrowser;
 import com.xilinx.rapidwright.rwroute.HoldFixer;
 import com.xilinx.rapidwright.rwroute.PartialCUFR;
 import com.xilinx.rapidwright.rwroute.PartialRouter;
@@ -101,6 +104,8 @@ public class ArrayBuilder {
 
     private Design topDesign;
 
+    private Design slrCrossing;
+
     private Design array;
 
     private String kernelClockName;
@@ -116,6 +121,8 @@ public class ArrayBuilder {
     private Map<ModuleInst, Site> newPlacementMap;
 
     private List<Module> modules;
+
+    private Module slrCrossingModule;
 
     private List<String> modInstNames;
 
@@ -155,6 +162,10 @@ public class ArrayBuilder {
         return topDesign;
     }
 
+    public Design getSlrCrossing() {
+        return slrCrossing;
+    }
+
     public Design getArray() {
         return array;
     }
@@ -192,6 +203,7 @@ public class ArrayBuilder {
 
         kernelDesign = config.getKernelDesign();
         topDesign = config.getTopDesign();
+        slrCrossing = config.getSlrCrossing();
 
         if (config.getPBlockStrings() != null) {
             List<PBlock> pblocks = new ArrayList<PBlock>();
@@ -387,6 +399,35 @@ public class ArrayBuilder {
         return placementGrid;
     }
 
+    public static Map<SLR, List<Site>> getValidSLRCrossings(Module module) {
+        Map<SLR, List<Site>> slrCrossingMap = new HashMap<>();
+        List<Site> validPlacements = module.getAllValidPlacements();
+        SiteInst topSiteInst = module.getSiteInsts().stream().min(Comparator.comparingInt(si -> si.getTile().getRow()))
+                .orElse(null);
+        int distanceFromBottomOfSLR = topSiteInst.getTile().getSLR().getLowerRight().getRow() - topSiteInst.getTile().getRow();
+        for (SLR slr : module.getDevice().getSLRs()) {
+            List<Site> placementsStartingInSLR = validPlacements.stream().filter((s) -> {
+                assert topSiteInst != null;
+                SLR topSLR = module.getCorrespondingSite(topSiteInst, s).getTile().getSLR();
+                return topSLR == slr;
+            }).collect(Collectors.toList());
+            List<Site> placementsAtCorrectRow = placementsStartingInSLR.stream().filter((s) -> {
+                Site newTopSite = module.getCorrespondingSite(topSiteInst, s);
+                int dist = slr.getLowerRight().getRow() - newTopSite.getTile().getRow();
+                return dist == distanceFromBottomOfSLR;
+            }).collect(Collectors.toList());
+            // Sort by descending Y coordinate, then ascending X coordinate
+            List<Site> sortedValidPlacements = placementsAtCorrectRow.stream().sorted((s1, s2) -> {
+                if (s1.getInstanceY() == s2.getInstanceY()) {
+                    return s1.getInstanceX() - s2.getInstanceX();
+                }
+                return s2.getInstanceY() - s1.getInstanceY();
+            }).collect(Collectors.toList());
+            slrCrossingMap.put(slr, sortedValidPlacements);
+        }
+        return slrCrossingMap;
+    }
+
     private List<Module> implementKernel(Path workDir) {
         t.stop().start("Implement Kernel");
         FileTools.makeDirs(workDir.toString());
@@ -427,7 +468,7 @@ public class ArrayBuilder {
         return modules;
     }
 
-    private List<Pair<Pair<Integer, Integer>, String>> calculateIdealArrayPlacement() {
+    private ArrayNetlistGraph.IdealArrayPlacement calculateIdealArrayPlacement() {
         t.stop().start("Calculate ideal array placement");
         // Find instances in existing design
         modInstNames = getMatchingModuleInstanceNames(modules.get(0), array);
@@ -440,23 +481,12 @@ public class ArrayBuilder {
             sideMap = InlineFlopTools.parseSideMap(getKernelDesign().getNetlist(), config.getSideMapFile());
         }
         setCondensedGraph(new ArrayNetlistGraph(array, modInstNames, sideMap));
-        Map<Pair<Integer, Integer>, String> idealPlacement =
+        ArrayNetlistGraph.IdealArrayPlacement idealPlacement =
                 getCondensedGraph().getGreedyPlacementGrid();
-        return idealPlacement.entrySet().stream()
-                .map((e) -> new Pair<>(e.getKey(), e.getValue()))
-                .sorted((p1, p2) -> {
-                    Pair<Integer, Integer> pa = p1.getFirst();
-                    Pair<Integer, Integer> pb = p2.getFirst();
-                    if (!Objects.equals(pa.getSecond(), pb.getSecond())) {
-                        return pa.getSecond().compareTo(pb.getSecond());
-                    }
-
-                    return pa.getFirst().compareTo(pb.getFirst());
-                })
-                .collect(Collectors.toList());
+        return idealPlacement;
     }
 
-    private List<Pair<Pair<Integer, Integer>, String>> prepareArrayForPlacement() {
+    private ArrayNetlistGraph.IdealArrayPlacement prepareArrayForPlacement() {
         Path workDir = Paths.get(config.getWorkDir());
         if (!config.isSkipImpl()) {
             modules = implementKernel(workDir);
@@ -502,15 +532,20 @@ public class ArrayBuilder {
             modules.add(m);
         }
 
-        // List containing pairs of (x,y) coordinates with the moduleInst name placed at that ideal (x,y) coordinate
-        List<Pair<Pair<Integer, Integer>, String>> idealPlacementList = null;
+        ArrayNetlistGraph.IdealArrayPlacement idealPlacement = null;
         if (getTopDesign() == null) {
             array = new Design("array", getKernelDesign().getPartName());
         } else {
             array = getTopDesign();
-            idealPlacementList = calculateIdealArrayPlacement();
+            idealPlacement = calculateIdealArrayPlacement();
         }
-        return idealPlacementList;
+
+        if (getSlrCrossing() != null) {
+            removeBUFGs(slrCrossing);
+            slrCrossingModule = new Module(slrCrossing);
+            slrCrossingModule.calculateAllValidPlacements(getDevice());
+        }
+        return idealPlacement;
     }
 
     private void placeInstancesWithManualPlacementFile() {
@@ -548,9 +583,172 @@ public class ArrayBuilder {
         }
     }
 
-    private void placeModuleInstancesAutomatically(List<Pair<Pair<Integer, Integer>, String>> idealPlacementList) {
-        int placed = 0;
-        ModuleInst curr = null;
+    private static boolean onlyConnectsToOtherInst(EDIFPort port, EDIFCellInst firstInst, EDIFCellInst otherInst) {
+        boolean onlyConnectsToOtherInst = true;
+        for (int i : port.getBitBlastedIndices()) {
+            EDIFPortInst portInst = firstInst.getPortInst(port.getPortInstNameFromPort(i));
+            EDIFNet net = portInst.getNet();
+            boolean netOnlyConnectsToOtherInst = true;
+            for (EDIFPortInst p : net.getPortInsts()) {
+                if (p.getCellInst() == null || (!p.getCellInst().equals(otherInst) && !p.equals(portInst))) {
+                    netOnlyConnectsToOtherInst = false;
+                    break;
+                }
+            }
+            if (!onlyConnectsToOtherInst && netOnlyConnectsToOtherInst) {
+                throw new RuntimeException("Bus ports that split connections between otherInst and other modules is currently not supported");
+            }
+            onlyConnectsToOtherInst &= netOnlyConnectsToOtherInst;
+        }
+        return onlyConnectsToOtherInst;
+    }
+
+    private EDIFHierCellInst mergeBlackBoxCells(String firstInstName, String secondInstName, String topInstName, String bottomInstName) {
+        EDIFHierCellInst firstHierInst = array.getNetlist().getHierCellInstFromName(firstInstName);
+        EDIFHierCellInst secondHierInst = array.getNetlist().getHierCellInstFromName(secondInstName);
+        EDIFCellInst firstInst = firstHierInst.getInst();
+        EDIFCellInst secondInst = secondHierInst.getInst();
+        EDIFCell firstCell = firstHierInst.getCellType();
+        EDIFCell secondCell = secondHierInst.getCellType();
+
+        EDIFHierCellInst topHierInst = slrCrossing.getNetlist().getHierCellInstFromName(topInstName);
+        EDIFHierCellInst bottomHierInst = slrCrossing.getNetlist().getHierCellInstFromName(bottomInstName);
+        EDIFCellInst topInst = topHierInst.getInst();
+        EDIFCellInst bottomInst = bottomHierInst.getInst();
+        EDIFCell topCell = topHierInst.getCellType();
+        EDIFCell bottomCell = bottomHierInst.getCellType();
+
+        EDIFCell slrCrossingTopCell = slrCrossing.getTopEDIFCell();
+
+        assert !firstCell.isPrimitive() && firstCell.isLeafCellOrBlackBox();
+        assert !secondCell.isPrimitive() && secondCell.isLeafCellOrBlackBox();
+
+        Map<EDIFPort, EDIFPort> firstInstPortMap = new HashMap<>();
+        firstInstPortMap.put(firstCell.getPort("clk"), slrCrossingTopCell.getPort("clk"));
+        firstInstPortMap.put(firstCell.getPort("accum_shift_in[0]"), slrCrossingTopCell.getPort("accum_shift_in[0]"));
+        firstInstPortMap.put(firstCell.getPort("accum_shift_in[1]"), slrCrossingTopCell.getPort("accum_shift_in[1]"));
+        firstInstPortMap.put(firstCell.getPort("accum_shift_in[2]"), slrCrossingTopCell.getPort("accum_shift_in[2]"));
+        firstInstPortMap.put(firstCell.getPort("accum_shift_in[3]"), slrCrossingTopCell.getPort("accum_shift_in[3]"));
+        firstInstPortMap.put(firstCell.getPort("accum_shift_out[0]"), slrCrossingTopCell.getPort("accum_shift_out[0]"));
+        firstInstPortMap.put(firstCell.getPort("accum_shift_out[1]"), slrCrossingTopCell.getPort("accum_shift_out[1]"));
+        firstInstPortMap.put(firstCell.getPort("accum_shift_out[2]"), slrCrossingTopCell.getPort("accum_shift_out[2]"));
+        firstInstPortMap.put(firstCell.getPort("accum_shift_out[3]"), slrCrossingTopCell.getPort("accum_shift_out[3]"));
+        firstInstPortMap.put(firstCell.getPort("north_inputs[0]"), slrCrossingTopCell.getPort("north_inputs[0]"));
+        firstInstPortMap.put(firstCell.getPort("north_inputs[1]"), slrCrossingTopCell.getPort("north_inputs[1]"));
+        firstInstPortMap.put(firstCell.getPort("north_inputs[2]"), slrCrossingTopCell.getPort("north_inputs[2]"));
+        firstInstPortMap.put(firstCell.getPort("north_inputs[3]"), slrCrossingTopCell.getPort("north_inputs[3]"));
+        firstInstPortMap.put(firstCell.getPort("accum_inputs[0]"), slrCrossingTopCell.getPort("accum_inputs[0]"));
+        firstInstPortMap.put(firstCell.getPort("accum_inputs[1]"), slrCrossingTopCell.getPort("accum_inputs[1]"));
+        firstInstPortMap.put(firstCell.getPort("accum_inputs[2]"), slrCrossingTopCell.getPort("accum_inputs[2]"));
+        firstInstPortMap.put(firstCell.getPort("accum_inputs[3]"), slrCrossingTopCell.getPort("accum_inputs[3]"));
+        firstInstPortMap.put(firstCell.getPort("west_inputs[0]"), slrCrossingTopCell.getPort("west_inputs[0]"));
+        firstInstPortMap.put(firstCell.getPort("west_inputs[1]"), slrCrossingTopCell.getPort("west_inputs[1]"));
+        firstInstPortMap.put(firstCell.getPort("west_inputs[2]"), slrCrossingTopCell.getPort("west_inputs[2]"));
+        firstInstPortMap.put(firstCell.getPort("west_inputs[3]"), slrCrossingTopCell.getPort("west_inputs[3]"));
+        firstInstPortMap.put(firstCell.getPort("east_outputs[0]"), slrCrossingTopCell.getPort("east_outputs[0]"));
+        firstInstPortMap.put(firstCell.getPort("east_outputs[1]"), slrCrossingTopCell.getPort("east_outputs[1]"));
+        firstInstPortMap.put(firstCell.getPort("east_outputs[2]"), slrCrossingTopCell.getPort("east_outputs[2]"));
+        firstInstPortMap.put(firstCell.getPort("east_outputs[3]"), slrCrossingTopCell.getPort("east_outputs[3]"));
+
+
+        Map<EDIFPort, EDIFPort> secondInstPortMap = new HashMap<>();
+        secondInstPortMap.put(secondCell.getPort("clk"), slrCrossingTopCell.getPort("clk"));
+        secondInstPortMap.put(secondCell.getPort("accum_shift_in[0]"), slrCrossingTopCell.getPort("accum_shift_in[4]"));
+        secondInstPortMap.put(secondCell.getPort("accum_shift_in[1]"), slrCrossingTopCell.getPort("accum_shift_in[5]"));
+        secondInstPortMap.put(secondCell.getPort("accum_shift_in[2]"), slrCrossingTopCell.getPort("accum_shift_in[6]"));
+        secondInstPortMap.put(secondCell.getPort("accum_shift_in[3]"), slrCrossingTopCell.getPort("accum_shift_in[7]"));
+        secondInstPortMap.put(secondCell.getPort("accum_shift_out[0]"), slrCrossingTopCell.getPort("accum_shift_out[4]"));
+        secondInstPortMap.put(secondCell.getPort("accum_shift_out[1]"), slrCrossingTopCell.getPort("accum_shift_out[5]"));
+        secondInstPortMap.put(secondCell.getPort("accum_shift_out[2]"), slrCrossingTopCell.getPort("accum_shift_out[6]"));
+        secondInstPortMap.put(secondCell.getPort("accum_shift_out[3]"), slrCrossingTopCell.getPort("accum_shift_out[7]"));
+        secondInstPortMap.put(secondCell.getPort("west_inputs[0]"), slrCrossingTopCell.getPort("west_inputs[4]"));
+        secondInstPortMap.put(secondCell.getPort("west_inputs[1]"), slrCrossingTopCell.getPort("west_inputs[5]"));
+        secondInstPortMap.put(secondCell.getPort("west_inputs[2]"), slrCrossingTopCell.getPort("west_inputs[6]"));
+        secondInstPortMap.put(secondCell.getPort("west_inputs[3]"), slrCrossingTopCell.getPort("west_inputs[7]"));
+        secondInstPortMap.put(secondCell.getPort("east_outputs[0]"), slrCrossingTopCell.getPort("east_outputs[4]"));
+        secondInstPortMap.put(secondCell.getPort("east_outputs[1]"), slrCrossingTopCell.getPort("east_outputs[5]"));
+        secondInstPortMap.put(secondCell.getPort("east_outputs[2]"), slrCrossingTopCell.getPort("east_outputs[6]"));
+        secondInstPortMap.put(secondCell.getPort("east_outputs[3]"), slrCrossingTopCell.getPort("east_outputs[7]"));
+        secondInstPortMap.put(secondCell.getPort("south_outputs[0]"), slrCrossingTopCell.getPort("south_outputs[0]"));
+        secondInstPortMap.put(secondCell.getPort("south_outputs[1]"), slrCrossingTopCell.getPort("south_outputs[1]"));
+        secondInstPortMap.put(secondCell.getPort("south_outputs[2]"), slrCrossingTopCell.getPort("south_outputs[2]"));
+        secondInstPortMap.put(secondCell.getPort("south_outputs[3]"), slrCrossingTopCell.getPort("south_outputs[3]"));
+        secondInstPortMap.put(secondCell.getPort("accum_outputs[0]"), slrCrossingTopCell.getPort("accum_outputs[0]"));
+        secondInstPortMap.put(secondCell.getPort("accum_outputs[1]"), slrCrossingTopCell.getPort("accum_outputs[1]"));
+        secondInstPortMap.put(secondCell.getPort("accum_outputs[2]"), slrCrossingTopCell.getPort("accum_outputs[2]"));
+        secondInstPortMap.put(secondCell.getPort("accum_outputs[3]"), slrCrossingTopCell.getPort("accum_outputs[3]"));
+
+        Set<EDIFPort> newPorts = new HashSet<>(firstInstPortMap.values());
+        newPorts.addAll(secondInstPortMap.values());
+
+        EDIFCell mergedCell;
+        if (firstCell.getLibrary().containsCell("slrCrossing")) {
+            mergedCell = firstCell.getLibrary().getCell("slrCrossing");
+        } else {
+            mergedCell = new EDIFCell(firstCell.getLibrary(), "slrCrossing");
+        }
+        for (EDIFPort port : newPorts) {
+            mergedCell.addPort(port);
+        }
+        mergedCell.addProperty(EDIFCellInst.BLACK_BOX_PROP_VERSAL, true);
+        EDIFCell parentCell = firstInst.getParentCell();
+        assert parentCell.equals(secondInst.getParentCell());
+        EDIFCellInst mergedCellInst = parentCell.createChildCellInst(firstInst + "_" + secondInst, mergedCell);
+        for (EDIFPort port : firstInst.getCellPorts()) {
+            for (int index : port.getBitBlastedIndices()) {
+                EDIFPortInst origPortInst = firstInst.getOrCreatePortInst(port.getPortInstNameFromPort(index));
+                EDIFNet net = origPortInst.getNet();
+                if (net != null) {
+                    net.removePortInst(origPortInst);
+                    if (firstInstPortMap.containsKey(port)) {
+                        EDIFPort mergedPort = firstInstPortMap.get(port);
+                        assert mergedPort != null;
+                        EDIFPortInst mergedPortInst = mergedCellInst.getOrCreatePortInst(mergedPort.getPortInstNameFromPort(index));
+                        net.addPortInst(mergedPortInst);
+                    }
+                }
+            }
+        }
+        for (EDIFPort port : secondInst.getCellPorts()) {
+            for (int index : port.getBitBlastedIndices()) {
+                EDIFPortInst origPortInst = secondInst.getOrCreatePortInst(port.getPortInstNameFromPort(index));
+                EDIFNet net = origPortInst.getNet();
+                if (net != null) {
+                    net.removePortInst(origPortInst);
+                    if (secondInstPortMap.containsKey(port)) {
+                        EDIFPort mergedPort = secondInstPortMap.get(port);
+                        assert mergedPort != null;
+                        EDIFPortInst mergedPortInst = mergedCellInst.getOrCreatePortInst(mergedPort.getPortInstNameFromPort(index));
+                        net.addPortInst(mergedPortInst);
+                    }
+                }
+            }
+        }
+        if (array.getPart().isVersal()) {
+            mergedCellInst.addProperty(EDIFCellInst.BLACK_BOX_PROP_VERSAL, "true");
+        } else {
+            mergedCellInst.addProperty(EDIFCellInst.BLACK_BOX_PROP, true);
+        }
+        parentCell.removeCellInst(firstInst);
+        parentCell.removeCellInst(secondInst);
+        return firstHierInst.getParent().getChild(mergedCellInst);
+    }
+
+    private boolean nextWillCrossSLR(List<List<Site>> validPlacementGrid, RelocatableTileRectangle boundingBox, int gridX, int gridY) {
+        Site origAnchor = validPlacementGrid.get(gridY).get(gridX);
+        SLR origSLR = origAnchor.getTile().getSLR();
+        for (int y = gridY + 1; y < validPlacementGrid.size(); y++) {
+            Site anchor = validPlacementGrid.get(y).get(gridX);
+            RelocatableTileRectangle newBoundingBox =
+                    boundingBox.getCorresponding(anchor.getTile(), origAnchor.getTile());
+            if (!boundingBox.overlaps(newBoundingBox)) {
+                return anchor.getTile().getSLR() != origSLR;
+            }
+        }
+        return false;
+    }
+
+    private void placeModuleInstancesAutomatically(ArrayNetlistGraph.IdealArrayPlacement idealPlacement) {
         int i = 0;
 
         // TODO: Figure out how to handle placement for multiple modules
@@ -558,59 +756,180 @@ public class ArrayBuilder {
         RelocatableTileRectangle boundingBox = module.getBoundingBox();
         List<RelocatableTileRectangle> boundingBoxes = new ArrayList<>();
         List<List<Site>> validPlacementGrid = getValidPlacementGrid(module);
-        int gridX = 0;
-        int gridY = 5;
+        Map<SLR, List<Site>> slrCrossingPlacementGrid = null;
+        if (getSlrCrossing() != null) {
+            slrCrossingPlacementGrid = getValidSLRCrossings(slrCrossingModule);
+        }
+        List<Pair<Pair<Integer, Integer>, String>> idealPlacementList = idealPlacement.getRowColumnOrderList();
+        Set<Pair<Integer, Integer>> alreadyPlaced = new HashSet<>();
+        Map<Pair<Integer, Integer>, Pair<Integer, Integer>> idealToPhysicalPlacementMap = new HashMap<>();
+        int topLeftPhysicalPlacementX = 0;
+        int topLeftPhysicalPlacementY = 5;
         int lastYCoordinate = 0;
         boolean searchDown = true;
-        while (placed < config.getInstCountLimit()) {
-            if (curr == null) {
-                String instName = modInstNames == null ? ("inst_" + i) : idealPlacementList.get(i).getSecond();
-                int yCoordinate = idealPlacementList.get(i).getFirst().getSecond();
-                if (yCoordinate > lastYCoordinate) {
-                    gridX = 0;
-                    searchDown = true;
+        int numPlaced = 0;
+        for (int x = 0; x < idealPlacement.getArrayWidth(); x++) {
+            for (int y = 0; y < idealPlacement.getArrayHeight(); y++) {
+                boolean searchRight = (y == 0);
+                if (alreadyPlaced.contains(new Pair<>(x, y))) {
+                    // Already placed as part of an SLR crossing module
+                    continue;
                 }
-                lastYCoordinate = yCoordinate;
-                curr = array.createModuleInst(instName, module);
-                i++;
-            }
-            if (gridY >= validPlacementGrid.size()) {
-                throw new RuntimeException("Optimal placement is too tall for device");
-            }
-            if (gridX >= validPlacementGrid.get(gridY).size()) {
-                throw new RuntimeException("Optimal placement is too wide for device");
-            }
-            Site anchor = validPlacementGrid.get(gridY).get(gridX);
-            RelocatableTileRectangle newBoundingBox =
-                    boundingBox.getCorresponding(anchor.getTile(), module.getAnchor().getTile());
-            boolean noOverlap = boundingBoxes.stream().noneMatch((b) -> b.overlaps(newBoundingBox));
-            if (config.isExactPlacement() || (noOverlap && !boundingBoxStraddlesClockRegion(newBoundingBox))) {
-                if (curr.place(anchor, true, false)) {
-                    if (config.isExactPlacement() && (straddlesClockRegion(curr)
-                            || !NetTools.getNetsWithOverlappingNodes(array).isEmpty())
-                    ) {
-                        curr.unplace();
+                String instToPlace = idealPlacement.getInstanceAtLocation(x, y);
+                int physX;
+                int physY;
+                if (x == 0 && y == 0) {
+                    // First element to place
+                    physX = topLeftPhysicalPlacementX;
+                    physY = topLeftPhysicalPlacementY;
+                } else {
+                    // Start from previous placement
+                    if (searchRight) {
+                        Pair<Integer, Integer> westPrevLoc = idealToPhysicalPlacementMap.get(new Pair<>(x - 1, y));
+                        physX = westPrevLoc.getFirst();
+                        physY = westPrevLoc.getSecond();
                     } else {
-                        boundingBoxes.add(newBoundingBox);
-                        placed++;
-                        newPlacementMap.put(curr, anchor);
-                        System.out.println("  ** PLACED: " + placed + " " + anchor + " " + curr.getName()
-                                + " " + curr.getAnchor().getTile().getSLR());
-                        curr = null;
-                        searchDown = false;
+                        Pair<Integer, Integer> northPrevLoc = idealToPhysicalPlacementMap.get(new Pair<>(x, y - 1));
+                        physX = northPrevLoc.getFirst();
+                        physY = northPrevLoc.getSecond();
+                    }
+                }
+
+                boolean placed = false;
+                while (!placed) {
+                    Site anchor = validPlacementGrid.get(physY).get(physX);
+                    RelocatableTileRectangle newBoundingBox =
+                            boundingBox.getCorresponding(anchor.getTile(), module.getAnchor().getTile());
+                    boolean noOverlap = boundingBoxes.stream().noneMatch((b) -> b.overlaps(newBoundingBox));
+                    if (noOverlap && !boundingBoxStraddlesClockRegion(newBoundingBox)) {
+                        boolean nextWillCross = nextWillCrossSLR(validPlacementGrid, newBoundingBox, physX, physY);
+                        if (nextWillCross && y + 1 < idealPlacement.getArrayHeight()) {
+                            // Need to place an SLR crossing
+                            String bottomInst = idealPlacement.getInstanceAtLocation(x, y+1);
+                            EDIFHierCellInst mergedCellInst = mergeBlackBoxCells(instToPlace, bottomInst,
+                                    "x[0].y[0].u_tile", "x[0].y[1].u_tile");
+                            ModuleInst curr = array.createModuleInst(mergedCellInst.getFullHierarchicalInstName(), slrCrossingModule);
+                            Site slrCrossingAnchor = slrCrossingPlacementGrid.get(anchor.getTile().getSLR()).get(x);
+                            RelocatableTileRectangle slrCrossingBoundingBox = slrCrossingModule.getBoundingBox()
+                                    .getCorresponding(slrCrossingAnchor.getTile(), slrCrossingModule.getAnchor().getTile());
+                            if (curr.place(slrCrossingAnchor, true, false)) {
+                                placed = true;
+                                boundingBoxes.add(newBoundingBox);
+                                newPlacementMap.put(curr, anchor);
+                                System.out.println("  ** PLACED: " + numPlaced + " " + anchor + " " + curr.getName()
+                                        + " " + curr.getAnchor().getTile().getSLR());
+                                numPlaced += 2;
+                                idealToPhysicalPlacementMap.put(new Pair<>(x, y), new Pair<>(physX, physY));
+                                idealToPhysicalPlacementMap.put(new Pair<>(x, y + 1), new Pair<>(physX, physY));
+                                alreadyPlaced.add(new Pair<>(x, y + 1));
+                                boundingBoxes.add(slrCrossingBoundingBox);
+                            } else {
+                                throw new RuntimeException("Failed to place module at site that should be valid anchor");
+                            }
+                        } else {
+                            // Choose proposed anchor to place instance
+                            ModuleInst curr = array.createModuleInst(instToPlace, module);
+                            if (curr.place(anchor, true, false)) {
+                                placed = true;
+                                boundingBoxes.add(newBoundingBox);
+                                newPlacementMap.put(curr, anchor);
+                                idealToPhysicalPlacementMap.put(new Pair<>(x, y), new Pair<>(physX, physY));
+                                System.out.println("  ** PLACED: " + numPlaced + " " + anchor + " " + curr.getName()
+                                        + " " + curr.getAnchor().getTile().getSLR());
+                                numPlaced++;
+                            } else {
+                                throw new RuntimeException("Failed to place module at site that should be valid anchor");
+                            }
+                        }
+                    }
+                    if (!placed) {
+                        // Could not place at proposed anchor, get new proposal
+                        if (searchRight) {
+                            // Search right from physX for valid placement
+                            physX++;
+                            if (physX >= validPlacementGrid.get(physY).size()) {
+                                throw new RuntimeException("Optimal placement is too wide for device");
+                            }
+                        } else {
+                            // Search down from physY for valid placement
+                            physY++;
+                            if (physY >= validPlacementGrid.size()) {
+                                throw new RuntimeException("Optimal placement is too tall for device");
+                            }
+                        }
                     }
                 }
             }
-            if (!searchDown) {
-                gridX++;
-            } else {
-                gridY++;
-            }
         }
+//        while (placed < config.getInstCountLimit()) {
+//            if (curr == null) {
+//                int yCoordinate = idealPlacementList.get(i).getFirst().getSecond();
+//                if (yCoordinate > lastYCoordinate) {
+//                    gridX = 0;
+//                    searchDown = true;
+//                }
+//                lastYCoordinate = yCoordinate;
+//            }
+//            Site anchor = validPlacementGrid.get(gridY).get(gridX);
+//            RelocatableTileRectangle newBoundingBox =
+//                    boundingBox.getCorresponding(anchor.getTile(), module.getAnchor().getTile());
+//            if (curr == null) {
+//                if (alreadyPlaced.contains(new Pair<>(gridX, gridY))) {
+//                    i++;
+//                    continue;
+//                }
+//                String topInst = idealPlacementList.get(i).getSecond();
+//                Pair<Integer, Integer> currLoc = idealPlacement.getPlacement(topInst);
+//                if (currLoc.getFirst() == 0 && currLoc.getSecond() == 4) {
+//                    System.out.println();
+//                }
+//                if (nextWillCross) {
+//                    // Create SLR Crossing moduleInst
+//                    String bottomInst = idealPlacement.getInstanceAtLocation(currLoc.getFirst(), currLoc.getSecond() + 1);
+//                    EDIFCellInst mergedCellInst = mergeBlackBoxCells(topInst, bottomInst,
+//                            "x[0].y[0].u_tile", "x[0].y[1].u_tile");
+//                    curr = array.createModuleInst(mergedCellInst.getName(), slrCrossingModule);
+//                    anchor = slrCrossingPlacementGrid.get(anchor.getTile().getSLR()).get(currLoc.getFirst());
+//                    newBoundingBox = slrCrossingModule.getBoundingBox()
+//                            .getCorresponding(anchor.getTile(), slrCrossingModule.getAnchor().getTile());
+//                    i++;
+//                    alreadyPlaced.add(new Pair<>(currLoc.getFirst(), currLoc.getSecond() + 1));
+//                } else {
+//                    // Create regular moduleInst
+//                    String instName = modInstNames == null ? ("inst_" + i) : idealPlacementList.get(i).getSecond();
+//                    curr = array.createModuleInst(instName, module);
+//                    i++;
+//                }
+//            }
+//            RelocatableTileRectangle finalNewBoundingBox = newBoundingBox;
+//            boolean noOverlap = boundingBoxes.stream().noneMatch((b) -> b.overlaps(finalNewBoundingBox));
+//            if (config.isExactPlacement() || (noOverlap && !boundingBoxStraddlesClockRegion(newBoundingBox))) {
+//                if (curr.place(anchor, true, false)) {
+//                    if (config.isExactPlacement() && (straddlesClockRegion(curr)
+//                            || !NetTools.getNetsWithOverlappingNodes(array).isEmpty())
+//                    ) {
+//                        curr.unplace();
+//                    } else {
+//                        boundingBoxes.add(newBoundingBox);
+//                        placed++;
+//                        newPlacementMap.put(curr, anchor);
+//                        System.out.println("  ** PLACED: " + placed + " " + anchor + " " + curr.getName()
+//                                + " " + curr.getAnchor().getTile().getSLR());
+//                        curr = null;
+//                        searchDown = false;
+//                    }
+//                }
+//            }
+//            if (!searchDown) {
+//                gridX++;
+//            } else {
+//                gridY++;
+//            }
+//        }
     }
 
     private void placeArray() {
-        List<Pair<Pair<Integer, Integer>, String>> idealPlacementList = prepareArrayForPlacement();
+        ArrayNetlistGraph.IdealArrayPlacement idealPlacement = prepareArrayForPlacement();
 
         t.stop().start("Place Instances");
         if (config.getOutputPlacementLocsFileName() != null) {
@@ -627,10 +946,18 @@ public class ArrayBuilder {
             }
         }
 
+        if (getSlrCrossing() != null) {
+            List<String> encryptedCells = getSlrCrossing().getNetlist().getEncryptedCells();
+            if (!encryptedCells.isEmpty()) {
+                System.out.println("Encrypted cells merged");
+                array.getNetlist().addEncryptedCells(encryptedCells);
+            }
+        }
+
         if (config.getInputPlacementFileName() != null) {
             placeInstancesWithManualPlacementFile();
         } else {
-            placeModuleInstancesAutomatically(idealPlacementList);
+            placeModuleInstancesAutomatically(idealPlacement);
         }
 
         if (config.getOutputPlacementFileName() != null) {
@@ -744,7 +1071,6 @@ public class ArrayBuilder {
     }
 
     public void createArray() {
-        // Place the array
         placeArray();
 
         // Unroute conflicting nets
@@ -760,8 +1086,12 @@ public class ArrayBuilder {
         if (config.shouldUnrouteStaticNets()) {
             unrouteStaticNets(array);
         }
-        array.getNetlist().consolidateAllToWorkLibrary();
+
+        array.getNetlist().consolidateAllToWorkLibrary(false, true);
         array.flattenDesign();
+//        array.getNetlist().collapseMacroUnisims(Series.Versal);
+//        array.getNetlist().exportEDIF("array.edif");
+//        System.exit(0);
 
         if (config.isOutOfContext()) {
             createFlopHarnessForArray();

@@ -177,7 +177,7 @@ public class ArrayBuilderSLRCrossingCreator {
     }
 
     private static void explorePerformance(Design design, boolean reuse) {
-        PerformanceExplorer pe = new PerformanceExplorer(design, "SLRCrossingCreator", "clk", 2.0);
+        PerformanceExplorer pe = new PerformanceExplorer(design, "SLRCrossingCreator", "clk", 1.6);
         pe.setGetBestPerPBlock(true);
         pe.setReusePreviousResults(reuse);
         pe.setLockPlacement(true);
@@ -389,9 +389,13 @@ public class ArrayBuilderSLRCrossingCreator {
         bottomSideMap.put(topCell.getPort("accum_outputs[3]"), PBlockSide.TOP);
 
         InlineFlopTools.createAndPlacePortFlopsOnSide(topDesign, "clk", bottomPBlock, bottomSideMap);
+        netlist.resetParentNetMap();
+
+        EDIFTools.ensurePreservedInterfaceVivado(topDesign.getNetlist());
 
         explorePerformance(topDesign, true);
         Design bestDesign = Design.readCheckpoint("SLRCrossingCreator/pblock0_best.dcp");
+        EDIFTools.removeVivadoBusPreventionAnnotations(bestDesign.getNetlist());
         InlineFlopTools.removeInlineFlops(bestDesign);
         bestDesign.writeCheckpoint(outputPath);
     }

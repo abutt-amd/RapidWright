@@ -52,6 +52,8 @@ public class ArrayBuilderConfig {
 
     private Design topDesign;
 
+    private Design slrCrossing;
+
     private double clkPeriod;
 
     private String kernelClkName;
@@ -95,6 +97,7 @@ public class ArrayBuilderConfig {
     private static final double DEFAULT_CLK_PERIOD_TARGET = 2.0;
 
     private static final List<String> KERNEL_DESIGN_OPTS = Arrays.asList("i", "input");
+    private static final List<String> SLR_CROSSING_OPTS = Arrays.asList("slr-crossing");
     private static final List<String> OUTPUT_DESIGN_OPTS = Arrays.asList("o", "output");
     private static final List<String> INPUT_EDIF_OPTS = Arrays.asList("e", "edif");
     private static final List<String> UTILIZATION_OPTS = Arrays.asList("u", "utilization");
@@ -148,6 +151,7 @@ public class ArrayBuilderConfig {
         return new OptionParser() {
             {
                 acceptsAll(KERNEL_DESIGN_OPTS, "Input Kernel Design (*.dcp or *.edf)").withRequiredArg();
+                acceptsAll(SLR_CROSSING_OPTS, "Kernel SLR crossing created with ArrayBuilderSLRCrossingCreate (*.dcp)").withRequiredArg();
                 acceptsAll(OUTPUT_DESIGN_OPTS, "Output Array Design (default is 'array.dcp')").withRequiredArg();
                 acceptsAll(PBLOCK_OPTS, "PBlock Constraint(s), separated with ';'").withRequiredArg();
                 acceptsAll(INPUT_EDIF_OPTS, "Companion EDIF for DCP  (*.edf)").withRequiredArg();
@@ -237,6 +241,11 @@ public class ArrayBuilderConfig {
         if (options.has(TOP_LEVEL_DESIGN_OPTS.get(0))) {
             Design d = Design.readCheckpoint((String) options.valueOf(TOP_LEVEL_DESIGN_OPTS.get(0)));
             setTopDesign(d);
+        }
+
+        if (options.has(SLR_CROSSING_OPTS.get(0))) {
+            Design d = Design.readCheckpoint((String) options.valueOf(SLR_CROSSING_OPTS.get(0)));
+            setSlrCrossing(d);
         }
 
         if (options.has(TARGET_CLK_PERIOD_OPTS.get(0))) {
@@ -476,5 +485,13 @@ public class ArrayBuilderConfig {
 
     public void setReuseResults(boolean reuseResults) {
         this.reuseResults = reuseResults;
+    }
+
+    public Design getSlrCrossing() {
+        return slrCrossing;
+    }
+
+    public void setSlrCrossing(Design slrCrossing) {
+        this.slrCrossing = slrCrossing;
     }
 }

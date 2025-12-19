@@ -495,7 +495,7 @@ public class EDIFNetlist extends EDIFName {
      * @param library          The library with cells to be migrated to work.
      * @param renameCollisions Flag to rename cells upon name collision
      */
-    public void migrateToWorkLibrary(String library, boolean renameCollisions) {
+    public void migrateToWorkLibrary(String library, boolean renameCollisions, boolean mergeCollisions) {
         EDIFLibrary work = getWorkLibrary();
         EDIFLibrary oldWork = getLibrary(library);
         List<EDIFCell> toRemove = new ArrayList<>(oldWork.getCells());
@@ -503,6 +503,12 @@ public class EDIFNetlist extends EDIFName {
             oldWork.removeCell(c);
             if (renameCollisions) {
                 work.addCellRenameDuplicates(c, "Work");
+            } else if (mergeCollisions) {
+                if (!work.containsCell(c)) {
+                    work.addCell(c);
+                } else {
+                    c.setLibrary(work);
+                }
             } else {
                 work.addCell(c);
             }
@@ -516,7 +522,11 @@ public class EDIFNetlist extends EDIFName {
      * @param library The library with cells to be migrated to work.
      */
     public void migrateToWorkLibrary(String library) {
-        migrateToWorkLibrary(library, false);
+        migrateToWorkLibrary(library, false, false);
+    }
+
+    public void consolidateAllToWorkLibrary(boolean renameCollisions) {
+        consolidateAllToWorkLibrary(renameCollisions, false);
     }
 
     /**
@@ -524,7 +534,7 @@ public class EDIFNetlist extends EDIFName {
      * 
      * @param renameCollisions Flag to rename cells upon name collision
      */
-    public void consolidateAllToWorkLibrary(boolean renameCollisions) {
+    public void consolidateAllToWorkLibrary(boolean renameCollisions, boolean mergeCollisions) {
         List<EDIFLibrary> librariesToMigrate = new ArrayList<>();
         for (EDIFLibrary l : getLibraries()) {
             if (!l.isHDIPrimitivesLibrary() && !l.isWorkLibrary()) {
@@ -532,7 +542,7 @@ public class EDIFNetlist extends EDIFName {
             }
         }
         for (EDIFLibrary l : librariesToMigrate) {
-            migrateToWorkLibrary(l.getName(), renameCollisions);
+            migrateToWorkLibrary(l.getName(), renameCollisions, mergeCollisions);
         }
     }
 
@@ -540,7 +550,7 @@ public class EDIFNetlist extends EDIFName {
      * Migrates all libraries except HDI primitives and work to the work library.
      */
     public void consolidateAllToWorkLibrary() {
-        consolidateAllToWorkLibrary(false);
+        consolidateAllToWorkLibrary(false, false);
     }
 
     private EDIFCell migrateCellAndSubCellsWorker(EDIFCell cell) {

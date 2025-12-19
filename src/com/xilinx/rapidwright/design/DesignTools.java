@@ -3511,6 +3511,9 @@ public class DesignTools {
                 }
 
                 String cellType = cell.getType();
+                if (cellType == null) {
+                    System.out.println();
+                }
                 if (cellType.equals("AND2B1L") || cellType.equals("OR2L")) {
                     // pass
                 } else if (cell.isFFRoutethruCell()) {

@@ -337,6 +337,8 @@ public class InlineFlopTools {
             Pair<Site, BEL> loc = nextAvailPlacement(design, siteItr, shiftedCentroid.getTile().getSLR());
             Cell flop = createAndPlaceFlopInlineOnTopPortInst(design, inst, loc, clk);
             siteInstsToRoute.add(flop.getSiteInst());
+        } else {
+            System.out.println("WARNING: Could not place inline flop for port " + hierPortInst);
         }
     }
 
