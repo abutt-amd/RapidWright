@@ -937,22 +937,22 @@ public class ArrayBuilder {
         }
 
         // Add encrypted cells from modules to array
-        for (Module module : modules) {
-            // Merge encrypted cells
-            List<String> encryptedCells = module.getNetlist().getEncryptedCells();
-            if (!encryptedCells.isEmpty()) {
-                System.out.println("Encrypted cells merged");
-                array.getNetlist().addEncryptedCells(encryptedCells);
-            }
-        }
+//        for (Module module : modules) {
+//            // Merge encrypted cells
+//            List<String> encryptedCells = module.getNetlist().getEncryptedCells();
+//            if (!encryptedCells.isEmpty()) {
+//                System.out.println("Encrypted cells merged");
+//                array.getNetlist().addEncryptedCells(encryptedCells);
+//            }
+//        }
 
-        if (getSlrCrossing() != null) {
-            List<String> encryptedCells = getSlrCrossing().getNetlist().getEncryptedCells();
-            if (!encryptedCells.isEmpty()) {
-                System.out.println("Encrypted cells merged");
-                array.getNetlist().addEncryptedCells(encryptedCells);
-            }
-        }
+//        if (getSlrCrossing() != null) {
+//            List<String> encryptedCells = getSlrCrossing().getNetlist().getEncryptedCells();
+//            if (!encryptedCells.isEmpty()) {
+//                System.out.println("Encrypted cells merged");
+//                array.getNetlist().addEncryptedCells(encryptedCells);
+//            }
+//        }
 
         if (config.getInputPlacementFileName() != null) {
             placeInstancesWithManualPlacementFile();
@@ -1064,9 +1064,9 @@ public class ArrayBuilder {
             });
 
             // Fix hold violations
-            t.stop().start("Fix Hold Violations");
-            HoldFixer holdFixer = new HoldFixer(array, getTopClockName());
-            holdFixer.fixHoldViolations();
+//            t.stop().start("Fix Hold Violations");
+//            HoldFixer holdFixer = new HoldFixer(array, getTopClockName());
+//            holdFixer.fixHoldViolations();
         }
     }
 
@@ -1243,6 +1243,7 @@ public class ArrayBuilder {
         ab.createArray();
 
         t.stop().start("Write DCP");
+        ab.getArray().setWrite2024Dot1DCP(true);
         ab.getArray().writeCheckpoint(ArrayBuilderConfig.getOutputName(args));
         t.stop().printSummary();
     }

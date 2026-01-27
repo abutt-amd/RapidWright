@@ -813,10 +813,10 @@ proc write_cell_to_edif_recursive { cell fp cells_written } {
 
 # WIP - Attempts to write out an EDIF netlist of the cell provided. Currently doesn't write out
 #       properties of any objects and does not do proper EDIF 'rename' substitution.
-proc write_cell_to_edif { cell file_name } {
+proc write_cells_to_edif { cells file_name } {
     set fp [open $file_name "w"]
-    set cell_type [get_property REF_NAME $cell]
-    puts $fp "(edif $cell_type"
+    # set cell_type [get_property REF_NAME $cell]
+    puts $fp "(edif encrypted_cells"
     puts $fp "  (edifversion 2 0 0)"
     puts $fp "  (edifLevel 0)"
     puts $fp "  (keywordmap (keywordlevel 0))"
@@ -835,7 +835,13 @@ proc write_cell_to_edif { cell file_name } {
     puts $fp "  (Library hdi_primitives"
     puts $fp "    (edifLevel 0)"
     puts $fp "    (technology (numberDefinition ))"
-    write_cell_to_edif_recursive $cell $fp [dict create]
+    set cells_written [dict create]
+    set i 0
+    foreach cell [get_cells $cells] {
+        puts $i
+        write_cell_to_edif_recursive $cell $fp $cells_written
+        incr i
+    }
     puts $fp "  )"
     puts $fp "(comment \"Reference To The Cell Of Highest Level\")"
     puts $fp ""
