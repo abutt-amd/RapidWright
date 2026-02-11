@@ -73,6 +73,7 @@ import com.xilinx.rapidwright.edif.EDIFDirection;
 import com.xilinx.rapidwright.edif.EDIFHierCellInst;
 import com.xilinx.rapidwright.edif.EDIFHierNet;
 import com.xilinx.rapidwright.edif.EDIFNet;
+import com.xilinx.rapidwright.edif.EDIFNetlist;
 import com.xilinx.rapidwright.edif.EDIFPort;
 import com.xilinx.rapidwright.edif.EDIFPortInst;
 import com.xilinx.rapidwright.edif.EDIFTools;
@@ -90,6 +91,7 @@ import com.xilinx.rapidwright.util.VivadoTools;
 
 import joptsimple.OptionParser;
 
+import static com.xilinx.rapidwright.util.ArrayBuilderSLRCrossingCreator.getBlackBoxToTopLevelMap;
 import static com.xilinx.rapidwright.util.Utils.isBRAM;
 import static com.xilinx.rapidwright.util.Utils.isDSP;
 import static com.xilinx.rapidwright.util.Utils.isSLICE;
@@ -105,6 +107,8 @@ public class ArrayBuilder {
     private Design topDesign;
 
     private Design slrCrossing;
+
+    private Design slrCrossingSynth;
 
     private Design array;
 
@@ -204,6 +208,7 @@ public class ArrayBuilder {
         kernelDesign = config.getKernelDesign();
         topDesign = config.getTopDesign();
         slrCrossing = config.getSlrCrossing();
+        slrCrossingSynth = config.getSlrCrossingSynth();
 
         if (config.getPBlockStrings() != null) {
             List<PBlock> pblocks = new ArrayList<PBlock>();
@@ -611,72 +616,24 @@ public class ArrayBuilder {
         EDIFCell firstCell = firstHierInst.getCellType();
         EDIFCell secondCell = secondHierInst.getCellType();
 
-        EDIFHierCellInst topHierInst = slrCrossing.getNetlist().getHierCellInstFromName(topInstName);
-        EDIFHierCellInst bottomHierInst = slrCrossing.getNetlist().getHierCellInstFromName(bottomInstName);
-        EDIFCellInst topInst = topHierInst.getInst();
-        EDIFCellInst bottomInst = bottomHierInst.getInst();
-        EDIFCell topCell = topHierInst.getCellType();
-        EDIFCell bottomCell = bottomHierInst.getCellType();
-
         EDIFCell slrCrossingTopCell = slrCrossing.getTopEDIFCell();
 
         assert !firstCell.isPrimitive() && firstCell.isLeafCellOrBlackBox();
         assert !secondCell.isPrimitive() && secondCell.isLeafCellOrBlackBox();
 
-        Map<EDIFPort, EDIFPort> firstInstPortMap = new HashMap<>();
-        firstInstPortMap.put(firstCell.getPort("clk"), slrCrossingTopCell.getPort("clk"));
-        firstInstPortMap.put(firstCell.getPort("accum_shift_in[0]"), slrCrossingTopCell.getPort("accum_shift_in[0]"));
-        firstInstPortMap.put(firstCell.getPort("accum_shift_in[1]"), slrCrossingTopCell.getPort("accum_shift_in[1]"));
-        firstInstPortMap.put(firstCell.getPort("accum_shift_in[2]"), slrCrossingTopCell.getPort("accum_shift_in[2]"));
-        firstInstPortMap.put(firstCell.getPort("accum_shift_in[3]"), slrCrossingTopCell.getPort("accum_shift_in[3]"));
-        firstInstPortMap.put(firstCell.getPort("accum_shift_out[0]"), slrCrossingTopCell.getPort("accum_shift_out[0]"));
-        firstInstPortMap.put(firstCell.getPort("accum_shift_out[1]"), slrCrossingTopCell.getPort("accum_shift_out[1]"));
-        firstInstPortMap.put(firstCell.getPort("accum_shift_out[2]"), slrCrossingTopCell.getPort("accum_shift_out[2]"));
-        firstInstPortMap.put(firstCell.getPort("accum_shift_out[3]"), slrCrossingTopCell.getPort("accum_shift_out[3]"));
-        firstInstPortMap.put(firstCell.getPort("north_inputs[0]"), slrCrossingTopCell.getPort("north_inputs[0]"));
-        firstInstPortMap.put(firstCell.getPort("north_inputs[1]"), slrCrossingTopCell.getPort("north_inputs[1]"));
-        firstInstPortMap.put(firstCell.getPort("north_inputs[2]"), slrCrossingTopCell.getPort("north_inputs[2]"));
-        firstInstPortMap.put(firstCell.getPort("north_inputs[3]"), slrCrossingTopCell.getPort("north_inputs[3]"));
-        firstInstPortMap.put(firstCell.getPort("accum_inputs[0]"), slrCrossingTopCell.getPort("accum_inputs[0]"));
-        firstInstPortMap.put(firstCell.getPort("accum_inputs[1]"), slrCrossingTopCell.getPort("accum_inputs[1]"));
-        firstInstPortMap.put(firstCell.getPort("accum_inputs[2]"), slrCrossingTopCell.getPort("accum_inputs[2]"));
-        firstInstPortMap.put(firstCell.getPort("accum_inputs[3]"), slrCrossingTopCell.getPort("accum_inputs[3]"));
-        firstInstPortMap.put(firstCell.getPort("west_inputs[0]"), slrCrossingTopCell.getPort("west_inputs[0]"));
-        firstInstPortMap.put(firstCell.getPort("west_inputs[1]"), slrCrossingTopCell.getPort("west_inputs[1]"));
-        firstInstPortMap.put(firstCell.getPort("west_inputs[2]"), slrCrossingTopCell.getPort("west_inputs[2]"));
-        firstInstPortMap.put(firstCell.getPort("west_inputs[3]"), slrCrossingTopCell.getPort("west_inputs[3]"));
-        firstInstPortMap.put(firstCell.getPort("east_outputs[0]"), slrCrossingTopCell.getPort("east_outputs[0]"));
-        firstInstPortMap.put(firstCell.getPort("east_outputs[1]"), slrCrossingTopCell.getPort("east_outputs[1]"));
-        firstInstPortMap.put(firstCell.getPort("east_outputs[2]"), slrCrossingTopCell.getPort("east_outputs[2]"));
-        firstInstPortMap.put(firstCell.getPort("east_outputs[3]"), slrCrossingTopCell.getPort("east_outputs[3]"));
+        EDIFNetlist netlist = slrCrossingSynth.getNetlist();
+        Map<String, String> topBBPortMap = getBlackBoxToTopLevelMap(netlist, topInstName);
+        Map<String, String> bottomBBPortMap = getBlackBoxToTopLevelMap(netlist, bottomInstName);
 
+        Map<EDIFPort, EDIFPort> firstInstPortMap = new HashMap<>();
+        for (Map.Entry<String, String> portPair : topBBPortMap.entrySet()) {
+            firstInstPortMap.put(firstCell.getPort(portPair.getKey()), slrCrossingTopCell.getPort(portPair.getValue()));
+        }
 
         Map<EDIFPort, EDIFPort> secondInstPortMap = new HashMap<>();
-        secondInstPortMap.put(secondCell.getPort("clk"), slrCrossingTopCell.getPort("clk"));
-        secondInstPortMap.put(secondCell.getPort("accum_shift_in[0]"), slrCrossingTopCell.getPort("accum_shift_in[4]"));
-        secondInstPortMap.put(secondCell.getPort("accum_shift_in[1]"), slrCrossingTopCell.getPort("accum_shift_in[5]"));
-        secondInstPortMap.put(secondCell.getPort("accum_shift_in[2]"), slrCrossingTopCell.getPort("accum_shift_in[6]"));
-        secondInstPortMap.put(secondCell.getPort("accum_shift_in[3]"), slrCrossingTopCell.getPort("accum_shift_in[7]"));
-        secondInstPortMap.put(secondCell.getPort("accum_shift_out[0]"), slrCrossingTopCell.getPort("accum_shift_out[4]"));
-        secondInstPortMap.put(secondCell.getPort("accum_shift_out[1]"), slrCrossingTopCell.getPort("accum_shift_out[5]"));
-        secondInstPortMap.put(secondCell.getPort("accum_shift_out[2]"), slrCrossingTopCell.getPort("accum_shift_out[6]"));
-        secondInstPortMap.put(secondCell.getPort("accum_shift_out[3]"), slrCrossingTopCell.getPort("accum_shift_out[7]"));
-        secondInstPortMap.put(secondCell.getPort("west_inputs[0]"), slrCrossingTopCell.getPort("west_inputs[4]"));
-        secondInstPortMap.put(secondCell.getPort("west_inputs[1]"), slrCrossingTopCell.getPort("west_inputs[5]"));
-        secondInstPortMap.put(secondCell.getPort("west_inputs[2]"), slrCrossingTopCell.getPort("west_inputs[6]"));
-        secondInstPortMap.put(secondCell.getPort("west_inputs[3]"), slrCrossingTopCell.getPort("west_inputs[7]"));
-        secondInstPortMap.put(secondCell.getPort("east_outputs[0]"), slrCrossingTopCell.getPort("east_outputs[4]"));
-        secondInstPortMap.put(secondCell.getPort("east_outputs[1]"), slrCrossingTopCell.getPort("east_outputs[5]"));
-        secondInstPortMap.put(secondCell.getPort("east_outputs[2]"), slrCrossingTopCell.getPort("east_outputs[6]"));
-        secondInstPortMap.put(secondCell.getPort("east_outputs[3]"), slrCrossingTopCell.getPort("east_outputs[7]"));
-        secondInstPortMap.put(secondCell.getPort("south_outputs[0]"), slrCrossingTopCell.getPort("south_outputs[0]"));
-        secondInstPortMap.put(secondCell.getPort("south_outputs[1]"), slrCrossingTopCell.getPort("south_outputs[1]"));
-        secondInstPortMap.put(secondCell.getPort("south_outputs[2]"), slrCrossingTopCell.getPort("south_outputs[2]"));
-        secondInstPortMap.put(secondCell.getPort("south_outputs[3]"), slrCrossingTopCell.getPort("south_outputs[3]"));
-        secondInstPortMap.put(secondCell.getPort("accum_outputs[0]"), slrCrossingTopCell.getPort("accum_outputs[0]"));
-        secondInstPortMap.put(secondCell.getPort("accum_outputs[1]"), slrCrossingTopCell.getPort("accum_outputs[1]"));
-        secondInstPortMap.put(secondCell.getPort("accum_outputs[2]"), slrCrossingTopCell.getPort("accum_outputs[2]"));
-        secondInstPortMap.put(secondCell.getPort("accum_outputs[3]"), slrCrossingTopCell.getPort("accum_outputs[3]"));
+        for (Map.Entry<String, String> portPair : bottomBBPortMap.entrySet()) {
+            secondInstPortMap.put(secondCell.getPort(portPair.getKey()), slrCrossingTopCell.getPort(portPair.getValue()));
+        }
 
         Set<EDIFPort> newPorts = new HashSet<>(firstInstPortMap.values());
         newPorts.addAll(secondInstPortMap.values());
@@ -807,12 +764,12 @@ public class ArrayBuilder {
                             // Need to place an SLR crossing
                             String bottomInst = idealPlacement.getInstanceAtLocation(x, y+1);
                             EDIFHierCellInst mergedCellInst = mergeBlackBoxCells(instToPlace, bottomInst,
-                                    "x[0].y[0].u_tile", "x[0].y[1].u_tile");
+                                    config.getSlrCrossingTopInstName(), config.getSlrCrossingBottomInstName());
                             ModuleInst curr = array.createModuleInst(mergedCellInst.getFullHierarchicalInstName(), slrCrossingModule);
                             Site slrCrossingAnchor = slrCrossingPlacementGrid.get(anchor.getTile().getSLR()).get(x);
                             RelocatableTileRectangle slrCrossingBoundingBox = slrCrossingModule.getBoundingBox()
                                     .getCorresponding(slrCrossingAnchor.getTile(), slrCrossingModule.getAnchor().getTile());
-                            if (curr.place(slrCrossingAnchor, true, false)) {
+                            if (curr.place(slrCrossingAnchor, false, false)) {
                                 placed = true;
                                 boundingBoxes.add(newBoundingBox);
                                 newPlacementMap.put(curr, anchor);
@@ -824,7 +781,7 @@ public class ArrayBuilder {
                                 alreadyPlaced.add(new Pair<>(x, y + 1));
                                 boundingBoxes.add(slrCrossingBoundingBox);
                             } else {
-                                throw new RuntimeException("Failed to place module at site that should be valid anchor");
+                                throw new RuntimeException("Failed to place module " + mergedCellInst + " at site that should be valid anchor");
                             }
                         } else {
                             // Choose proposed anchor to place instance
@@ -1057,16 +1014,16 @@ public class ArrayBuilder {
             PartialRouter.routeDesignPartialNonTimingDriven(array, pinsToRoute);
         } else if (config.isRouteDesign()) {
             t.stop().start("Route Design");
-            PartialCUFR.routeDesignWithUserDefinedArguments(array, new String[]{
+            PartialRouter.routeDesignWithUserDefinedArguments(array, new String[]{
                     "--fixBoundingBox",
                     "--useUTurnNodes",
                     "--nonTimingDriven",
             });
 
             // Fix hold violations
-//            t.stop().start("Fix Hold Violations");
-//            HoldFixer holdFixer = new HoldFixer(array, getTopClockName());
-//            holdFixer.fixHoldViolations();
+            t.stop().start("Fix Hold Violations");
+            HoldFixer holdFixer = new HoldFixer(array, getTopClockName());
+            holdFixer.fixHoldViolations();
         }
     }
 

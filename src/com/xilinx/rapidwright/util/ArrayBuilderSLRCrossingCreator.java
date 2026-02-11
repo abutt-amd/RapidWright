@@ -36,8 +36,10 @@ import com.xilinx.rapidwright.device.Node;
 import com.xilinx.rapidwright.device.SLR;
 import com.xilinx.rapidwright.device.Site;
 import com.xilinx.rapidwright.device.Tile;
+import com.xilinx.rapidwright.edif.EDIFCellInst;
 import com.xilinx.rapidwright.edif.EDIFHierCellInst;
 import com.xilinx.rapidwright.edif.EDIFNetlist;
+import com.xilinx.rapidwright.edif.EDIFPortInst;
 import com.xilinx.rapidwright.edif.EDIFTools;
 import com.xilinx.rapidwright.edif.EDIFPort;
 import com.xilinx.rapidwright.edif.EDIFCell;
@@ -57,16 +59,23 @@ import java.util.Map;
 import java.util.Set;
 
 public class ArrayBuilderSLRCrossingCreator {
-    private static final List<String> INPUT_KERNEL_OPTS = Arrays.asList("i", "input");
-    private static final List<String> TOP_DESIGN_OPTS = Arrays.asList("t", "top");
+    private static final List<String> INPUT_KERNEL_OPTS = Arrays.asList("k", "kernel");
+    private static final List<String> CROSSING_DESIGN_OPTS = Arrays.asList("c", "crossing");
+    private static final List<String> TOP_INST_NAME_OPTS = Arrays.asList("t", "top-inst");
+    private static final List<String> BOT_INST_NAME_OPTS = Arrays.asList("b", "bot-inst");
+    private static final List<String> SIDE_MAP_OPTS = Arrays.asList("s", "side-map");
     private static final List<String> OUTPUT_OPTS = Arrays.asList("o", "output");
+    private static final List<String> OUTPUT_CROSSING_MAP_OPTS = Arrays.asList("m", "crossing-map");
     private static final List<String> HELP_OPTS = Arrays.asList("?", "h", "help");
 
     private static OptionParser createOptionParser() {
         return new OptionParser() {
             {
                 acceptsAll(INPUT_KERNEL_OPTS, "Input Kernel Design (*.dcp)").withRequiredArg();
-                acceptsAll(TOP_DESIGN_OPTS, "Top Design of SLR Crossing (*.dcp)").withRequiredArg();
+                acceptsAll(CROSSING_DESIGN_OPTS, "Top Crossing Design of SLR Crossing (*.dcp)").withRequiredArg();
+                acceptsAll(TOP_INST_NAME_OPTS, "Name of the top instance in the synthesized SLR Crossing design").withRequiredArg();
+                acceptsAll(BOT_INST_NAME_OPTS, "Name of the bottom instance in the synthesized SLR Crossing design").withRequiredArg();
+                acceptsAll(SIDE_MAP_OPTS, "Side Map for Kernel Design").withRequiredArg();
                 acceptsAll(OUTPUT_OPTS, "Output SLR Crossing Design (*.dcp)").withRequiredArg();
                 acceptsAll(HELP_OPTS, "Print this help message").forHelp();
             }
@@ -120,6 +129,9 @@ public class ArrayBuilderSLRCrossingCreator {
             }
             IntentCode ic = node.getIntentCode();
             if (ic == IntentCode.NODE_SLL_DATA) {
+                if (node.getAllUphillNodes().size() < 2 && node.getAllDownhillNodes().size() < 2) {
+                    continue;
+                }
                 sllNodes.add(node);
             }
         }
@@ -185,6 +197,32 @@ public class ArrayBuilderSLRCrossingCreator {
         pe.getBestDesignPerPBlock();
     }
 
+    public static Map<String, String> getBlackBoxToTopLevelMap(EDIFNetlist netlist, String blackBoxName) {
+        Map<String, String> bbToTopLevelMap = new HashMap<>();
+        EDIFCellInst bbCellInst = netlist.getHierCellInstFromName(blackBoxName).getInst();
+        EDIFCell bbCell = bbCellInst.getCellType();
+        for (EDIFPort port : bbCell.getPorts()) {
+            EDIFPort topPort = null;
+            for (int i : port.getBitBlastedIndices()) {
+                EDIFPortInst portInst = bbCellInst.getPortInst(port.getPortInstNameFromPort(i));
+                List<EDIFPortInst> topLevelPortInsts = portInst.getNet().getAllTopLevelPortInsts();
+                int numSrcs = topLevelPortInsts.size();
+                if (numSrcs == 0) {
+                    continue;
+                }
+                assert numSrcs == 1;
+                if (topPort != null && topPort != topLevelPortInsts.get(0).getPort()) {
+                    throw new RuntimeException("Port insts don't match");
+                }
+                topPort = topLevelPortInsts.get(0).getPort();
+            }
+            if (topPort != null) {
+                bbToTopLevelMap.put(port.getBusName(), topPort.getBusName());
+            }
+        }
+        return bbToTopLevelMap;
+    }
+
     public static void main(String[] args) {
         OptionParser p = createOptionParser();
         OptionSet options = p.parse(args);
@@ -209,12 +247,12 @@ public class ArrayBuilderSLRCrossingCreator {
         }
 
         String topDesignPath;
-        if (options.has(TOP_DESIGN_OPTS.get(0))) {
-            topDesignPath = (String) options.valueOf(TOP_DESIGN_OPTS.get(0));
+        if (options.has(CROSSING_DESIGN_OPTS.get(0))) {
+            topDesignPath = (String) options.valueOf(CROSSING_DESIGN_OPTS.get(0));
         } else {
-            throw new RuntimeException("No top design found. "
-                    + "Please specify a top design (*.dcp) using options "
-                    + TOP_DESIGN_OPTS);
+            throw new RuntimeException("No top crossing design found. "
+                    + "Please specify a top crossing design (*.dcp) using options "
+                    + CROSSING_DESIGN_OPTS);
         }
 
         String outputPath;
@@ -224,6 +262,33 @@ public class ArrayBuilderSLRCrossingCreator {
             throw new RuntimeException("No output path provided. "
                     + "Please specify an output path (*.dcp) using options "
                     + OUTPUT_OPTS);
+        }
+
+        String sideMapPath;
+        if (options.has(SIDE_MAP_OPTS.get(0))) {
+            sideMapPath = (String) options.valueOf(SIDE_MAP_OPTS.get(0));
+        } else {
+            throw new RuntimeException("No side map path provided. "
+                    + "Please specify a side map path using options "
+                    + SIDE_MAP_OPTS);
+        }
+
+        String topInstName;
+        if (options.has(TOP_INST_NAME_OPTS.get(0))) {
+            topInstName = (String) options.valueOf(TOP_INST_NAME_OPTS.get(0));
+        } else {
+            throw new RuntimeException("No top instance name provided. "
+                    + "Please specify a top instance name using options "
+                    + TOP_INST_NAME_OPTS);
+        }
+
+        String bottomInstName;
+        if (options.has(BOT_INST_NAME_OPTS.get(0))) {
+            bottomInstName = (String) options.valueOf(BOT_INST_NAME_OPTS.get(0));
+        } else {
+            throw new RuntimeException("No top instance name provided. "
+                    + "Please specify a top instance name using options "
+                    + BOT_INST_NAME_OPTS);
         }
 
         Path kernelFile = Paths.get(kernelDesignPath);
@@ -248,6 +313,8 @@ public class ArrayBuilderSLRCrossingCreator {
 
         PBlock pblock = pblocks.values().iterator().next();
 
+
+
         List<String> clockNets = ConstraintTools.getClockNetsFromXDC(kernelDesign);
 
         assert(clockNets.size() == 1);
@@ -264,11 +331,21 @@ public class ArrayBuilderSLRCrossingCreator {
         int lastAnchorInSLRIndex = -1;
         int firstAnchorInOtherSLRIndex = -1;
 
+        int xCoordinate = 0;
+        int x = 0;
+        for (Site site : validPlacementGrid.get(0)) {
+            if (site.getInstanceX() == module.getAnchor().getInstanceX()) {
+                xCoordinate = x;
+                break;
+            }
+            x++;
+        }
+
         SLR firstSLR = validPlacementGrid.get(0).get(0).getTile().getSLR();
 
         int i = 0;
         for (List<Site> sites : validPlacementGrid) {
-            Site anchor = sites.get(0);
+            Site anchor = sites.get(xCoordinate);
             if (anchor.getTile().getSLR() != firstSLR) {
                 firstAnchorInOtherSLRIndex = i;
                 break;
@@ -284,30 +361,27 @@ public class ArrayBuilderSLRCrossingCreator {
             topDesign.getNetlist().addEncryptedCells(encryptedCells);
         }
 
-        List<String> moduleInstNames = ArrayBuilder.getMatchingModuleInstanceNames(module, topDesign);
-
-        String topInstName = "x[0].y[0].u_tile";
         EDIFHierCellInst topHierInst = topDesign.getNetlist().getHierCellInstFromName(topInstName);
         if (topHierInst == null) {
             throw new RuntimeException("Instance name " + topInstName + " is invalid");
         }
         EDIFTools.removeVivadoBusPreventionAnnotations(kernelDesign.getNetlist());
-        ModuleInst topInst = topDesign.createModuleInst(topInstName, module);
 
-        String bottomInstName = "x[0].y[1].u_tile";
         EDIFHierCellInst bottomHierInst = topDesign.getNetlist().getHierCellInstFromName(bottomInstName);
         if (bottomHierInst == null) {
             throw new RuntimeException("Instance name " + bottomInstName + " is invalid");
         }
-        ModuleInst bottomInst = topDesign.createModuleInst(bottomInstName, module);
 
-        Site lastAnchorInSLR = validPlacementGrid.get(lastAnchorInSLRIndex).get(0);
+        Site lastAnchorInSLR = validPlacementGrid.get(lastAnchorInSLRIndex).get(xCoordinate);
         assert lastAnchorInSLR != null;
         int topOffsetY = lastAnchorInSLR.getTile().getRow() - module.getAnchor().getTile().getRow();
 
         PBlock topPBlock = new PBlock(kernelDesign.getDevice(), pblock.getAllSites(null));
         topPBlock.setName("pblock_0");
-        topPBlock.movePBlock(0, topOffsetY);
+        boolean wasMoved = topPBlock.movePBlock(0, topOffsetY);
+        if (!wasMoved) {
+            throw new RuntimeException("Failed to move top pblock to bottom of SLR");
+        }
 
         List<PBlock> candidates = getCandidateBottomPBlocks(module, topPBlock, lastAnchorInSLRIndex);
         PBlock bottomPBlock = chooseBestCandidate(topPBlock, candidates);
@@ -331,72 +405,49 @@ public class ArrayBuilderSLRCrossingCreator {
         topDesign.setDesignOutOfContext(true);
         topDesign.setAutoIOBuffers(false);
 
+        // Get black-box port maps
         EDIFNetlist netlist = topDesign.getNetlist();
+        Map<String, String> topBBPortMap = getBlackBoxToTopLevelMap(netlist, topInstName);
+        Map<String, String> bottomBBPortMap = getBlackBoxToTopLevelMap(netlist, bottomInstName);
+
+        Map<EDIFPort, PBlockSide> sideMap = InlineFlopTools.parseSideMap(kernelDesign.getNetlist(), sideMapPath);
         EDIFCell topCell = netlist.getTopCell();
+        EDIFCellInst topBBInst = netlist.getCellInstFromHierName(topInstName);
         Map<EDIFPort, PBlockSide> topSideMap = new HashMap<>();
-        topSideMap.put(topCell.getPort("accum_shift_in[0]"), PBlockSide.LEFT);
-        topSideMap.put(topCell.getPort("accum_shift_in[1]"), PBlockSide.LEFT);
-        topSideMap.put(topCell.getPort("accum_shift_in[2]"), PBlockSide.LEFT);
-        topSideMap.put(topCell.getPort("accum_shift_in[3]"), PBlockSide.LEFT);
-        topSideMap.put(topCell.getPort("accum_shift_out[0]"), PBlockSide.RIGHT);
-        topSideMap.put(topCell.getPort("accum_shift_out[1]"), PBlockSide.RIGHT);
-        topSideMap.put(topCell.getPort("accum_shift_out[2]"), PBlockSide.RIGHT);
-        topSideMap.put(topCell.getPort("accum_shift_out[3]"), PBlockSide.RIGHT);
-        topSideMap.put(topCell.getPort("accum_inputs[0]"), PBlockSide.TOP);
-        topSideMap.put(topCell.getPort("accum_inputs[1]"), PBlockSide.TOP);
-        topSideMap.put(topCell.getPort("accum_inputs[2]"), PBlockSide.TOP);
-        topSideMap.put(topCell.getPort("accum_inputs[3]"), PBlockSide.TOP);
-        topSideMap.put(topCell.getPort("north_inputs[0]"), PBlockSide.TOP);
-        topSideMap.put(topCell.getPort("north_inputs[1]"), PBlockSide.TOP);
-        topSideMap.put(topCell.getPort("north_inputs[2]"), PBlockSide.TOP);
-        topSideMap.put(topCell.getPort("north_inputs[3]"), PBlockSide.TOP);
-        topSideMap.put(topCell.getPort("west_inputs[0]"), PBlockSide.LEFT);
-        topSideMap.put(topCell.getPort("west_inputs[1]"), PBlockSide.LEFT);
-        topSideMap.put(topCell.getPort("west_inputs[2]"), PBlockSide.LEFT);
-        topSideMap.put(topCell.getPort("west_inputs[3]"), PBlockSide.LEFT);
-        topSideMap.put(topCell.getPort("east_outputs[0]"), PBlockSide.RIGHT);
-        topSideMap.put(topCell.getPort("east_outputs[1]"), PBlockSide.RIGHT);
-        topSideMap.put(topCell.getPort("east_outputs[2]"), PBlockSide.RIGHT);
-        topSideMap.put(topCell.getPort("east_outputs[3]"), PBlockSide.RIGHT);
+        for (Map.Entry<String, String> portPair : topBBPortMap.entrySet()) {
+            PBlockSide originalSide = sideMap.get(topBBInst.getPort(portPair.getKey()));
+            if (originalSide == null || originalSide == PBlockSide.BOTTOM) {
+                continue;
+            }
+            topSideMap.put(topCell.getPort(portPair.getValue()), originalSide);
+        }
 
         InlineFlopTools.createAndPlacePortFlopsOnSide(topDesign, "clk", topPBlock, topSideMap);
         topDesign.getNetlist().resetParentNetMap();
 
         Map<EDIFPort, PBlockSide> bottomSideMap = new HashMap<>();
-        bottomSideMap.put(topCell.getPort("accum_shift_in[4]"), PBlockSide.LEFT);
-        bottomSideMap.put(topCell.getPort("accum_shift_in[5]"), PBlockSide.LEFT);
-        bottomSideMap.put(topCell.getPort("accum_shift_in[6]"), PBlockSide.LEFT);
-        bottomSideMap.put(topCell.getPort("accum_shift_in[7]"), PBlockSide.LEFT);
-        bottomSideMap.put(topCell.getPort("accum_shift_out[4]"), PBlockSide.RIGHT);
-        bottomSideMap.put(topCell.getPort("accum_shift_out[5]"), PBlockSide.RIGHT);
-        bottomSideMap.put(topCell.getPort("accum_shift_out[6]"), PBlockSide.RIGHT);
-        bottomSideMap.put(topCell.getPort("accum_shift_out[7]"), PBlockSide.RIGHT);
-        bottomSideMap.put(topCell.getPort("west_inputs[4]"), PBlockSide.LEFT);
-        bottomSideMap.put(topCell.getPort("west_inputs[5]"), PBlockSide.LEFT);
-        bottomSideMap.put(topCell.getPort("west_inputs[6]"), PBlockSide.LEFT);
-        bottomSideMap.put(topCell.getPort("west_inputs[7]"), PBlockSide.LEFT);
-        bottomSideMap.put(topCell.getPort("east_outputs[4]"), PBlockSide.RIGHT);
-        bottomSideMap.put(topCell.getPort("east_outputs[5]"), PBlockSide.RIGHT);
-        bottomSideMap.put(topCell.getPort("east_outputs[6]"), PBlockSide.RIGHT);
-        bottomSideMap.put(topCell.getPort("east_outputs[7]"), PBlockSide.RIGHT);
-        bottomSideMap.put(topCell.getPort("south_outputs[0]"), PBlockSide.TOP);
-        bottomSideMap.put(topCell.getPort("south_outputs[1]"), PBlockSide.TOP);
-        bottomSideMap.put(topCell.getPort("south_outputs[2]"), PBlockSide.TOP);
-        bottomSideMap.put(topCell.getPort("south_outputs[3]"), PBlockSide.TOP);
-        bottomSideMap.put(topCell.getPort("accum_outputs[0]"), PBlockSide.TOP);
-        bottomSideMap.put(topCell.getPort("accum_outputs[1]"), PBlockSide.TOP);
-        bottomSideMap.put(topCell.getPort("accum_outputs[2]"), PBlockSide.TOP);
-        bottomSideMap.put(topCell.getPort("accum_outputs[3]"), PBlockSide.TOP);
+        EDIFCellInst bottomBBInst = netlist.getCellInstFromHierName(bottomInstName);
+        for (Map.Entry<String, String> portPair : bottomBBPortMap.entrySet()) {
+            EDIFPort bbPort = bottomBBInst.getPort(portPair.getKey());
+            PBlockSide originalSide = sideMap.get(bbPort);
+            if (originalSide == null || originalSide == PBlockSide.TOP) {
+                continue;
+            }
+            EDIFPort topCellPort = topCell.getPort(portPair.getValue());
+            bottomSideMap.put(topCellPort, originalSide);
+        }
+        bottomSideMap.keySet().removeAll(topSideMap.keySet());
 
         InlineFlopTools.createAndPlacePortFlopsOnSide(topDesign, "clk", bottomPBlock, bottomSideMap);
         netlist.resetParentNetMap();
 
         EDIFTools.ensurePreservedInterfaceVivado(topDesign.getNetlist());
 
-        explorePerformance(topDesign, true);
+        explorePerformance(topDesign, false);
         Design bestDesign = Design.readCheckpoint("SLRCrossingCreator/pblock0_best.dcp");
         EDIFTools.removeVivadoBusPreventionAnnotations(bestDesign.getNetlist());
         InlineFlopTools.removeInlineFlops(bestDesign);
+
         bestDesign.writeCheckpoint(outputPath);
     }
 }
