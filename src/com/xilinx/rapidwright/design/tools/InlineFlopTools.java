@@ -22,17 +22,6 @@
 
 package com.xilinx.rapidwright.design.tools;
 
-import java.util.ArrayList;
-import java.util.Arrays;
-import java.util.HashMap;
-import java.util.HashSet;
-import java.util.Iterator;
-import java.util.List;
-import java.util.Map;
-import java.util.Set;
-import java.util.stream.Collectors;
-import java.util.Map.Entry;
-
 import com.xilinx.rapidwright.design.Cell;
 import com.xilinx.rapidwright.design.Design;
 import com.xilinx.rapidwright.design.DesignTools;
@@ -42,13 +31,39 @@ import com.xilinx.rapidwright.design.SitePinInst;
 import com.xilinx.rapidwright.design.Unisim;
 import com.xilinx.rapidwright.design.blocks.PBlock;
 import com.xilinx.rapidwright.design.blocks.PBlockSide;
-import com.xilinx.rapidwright.device.*;
+import com.xilinx.rapidwright.device.BEL;
+import com.xilinx.rapidwright.device.Device;
+import com.xilinx.rapidwright.device.SLR;
+import com.xilinx.rapidwright.device.Series;
+import com.xilinx.rapidwright.device.Site;
+import com.xilinx.rapidwright.device.SiteTypeEnum;
+import com.xilinx.rapidwright.device.Tile;
 import com.xilinx.rapidwright.eco.ECOPlacementHelper;
-import com.xilinx.rapidwright.edif.*;
+import com.xilinx.rapidwright.edif.EDIFCell;
+import com.xilinx.rapidwright.edif.EDIFCellInst;
+import com.xilinx.rapidwright.edif.EDIFHierCellInst;
+import com.xilinx.rapidwright.edif.EDIFHierNet;
+import com.xilinx.rapidwright.edif.EDIFHierPortInst;
+import com.xilinx.rapidwright.edif.EDIFNet;
+import com.xilinx.rapidwright.edif.EDIFNetlist;
+import com.xilinx.rapidwright.edif.EDIFPort;
+import com.xilinx.rapidwright.edif.EDIFPortInst;
+import com.xilinx.rapidwright.edif.EDIFTools;
 import com.xilinx.rapidwright.placer.blockplacer.Point;
 import com.xilinx.rapidwright.util.FileTools;
 import com.xilinx.rapidwright.util.Pair;
 import com.xilinx.rapidwright.util.StringTools;
+
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.HashMap;
+import java.util.HashSet;
+import java.util.Iterator;
+import java.util.List;
+import java.util.Map;
+import java.util.Map.Entry;
+import java.util.Set;
+import java.util.stream.Collectors;
 
 import static com.xilinx.rapidwright.util.Utils.isCLB;
 
@@ -154,7 +169,7 @@ public class InlineFlopTools {
      * @param portSideMap Map from ports to side of the pblock the flop should be placed on
      */
     public static void createAndPlacePortFlopsOnSide(Design design, String clkNet, PBlock keepOut,
-                                                      Map<EDIFPort, PBlockSide> portSideMap) {
+                                                     Map<EDIFPort, PBlockSide> portSideMap) {
         assert (design.getSiteInsts().isEmpty());
         Site start = keepOut.getAllSites("SLICE").iterator().next(); // TODO this is a bit wasteful
         boolean exclude = true;
@@ -178,7 +193,7 @@ public class InlineFlopTools {
 
                 Iterator<Site> siteItr = ECOPlacementHelper.spiralOutFrom(shiftedSite, keepOut, exclude).iterator();
                 siteItr.next(); // Skip the first site, as we are suggesting one inside the pblock
-                Pair<Site, BEL> loc = nextAvailPlacement(design, siteItr, null);
+                Pair<Site, BEL> loc = nextAvailFlopPlacement(design, siteItr, null);
                 if (loc == null) {
                     throw new RuntimeException("Failed to find valid placement location for flip-flop");
                 }
@@ -230,7 +245,7 @@ public class InlineFlopTools {
                 } else {
                     Iterator<Site> siteItr = ECOPlacementHelper.spiralOutFrom(start, keepOut, exclude).iterator();
                     siteItr.next(); // Skip the first site, as we are suggesting one inside the pblock
-                    Pair<Site, BEL> loc = nextAvailPlacement(design, siteItr, null);
+                    Pair<Site, BEL> loc = nextAvailFlopPlacement(design, siteItr, null);
                     Cell flop = createAndPlaceFlopInlineOnTopPortInst(design, inst, loc, clk);
                     siteInstsToRoute.add(flop.getSiteInst());
                 }
@@ -334,7 +349,7 @@ public class InlineFlopTools {
             if (keepOut.containsTile(shiftedCentroid.getTile())) {
                 siteItr.next();
             }
-            Pair<Site, BEL> loc = nextAvailPlacement(design, siteItr, shiftedCentroid.getTile().getSLR());
+            Pair<Site, BEL> loc = nextAvailFlopPlacement(design, siteItr, shiftedCentroid.getTile().getSLR());
             Cell flop = createAndPlaceFlopInlineOnTopPortInst(design, inst, loc, clk);
             siteInstsToRoute.add(flop.getSiteInst());
         } else {
@@ -342,7 +357,7 @@ public class InlineFlopTools {
         }
     }
 
-    private static Pair<Site, BEL> nextAvailPlacement(Design design, Iterator<Site> itr, SLR slr) {
+    private static Pair<Site, BEL> nextAvailFlopPlacement(Design design, Iterator<Site> itr, SLR slr) {
         while (itr.hasNext()) {
             Site curr = itr.next();
             if (slr != null && curr.getTile().getSLR() != slr) {
@@ -377,10 +392,10 @@ public class InlineFlopTools {
      * placed, the router is forced to route connections of the port to the flop.
      * This can help alleviate congestion when the kernels are placed/relocated in context.
      *
-     * @param design            The design to modify
-     * @param portInst          The port to place an inline flip-flop on
-     * @param loc               A pair of the site and BEL to place the flip-flop at
-     * @param clk               The clock net to use for the inline flip-flop
+     * @param design   The design to modify
+     * @param portInst The port to place an inline flip-flop on
+     * @param loc      A pair of the site and BEL to place the flip-flop at
+     * @param clk      The clock net to use for the inline flip-flop
      */
     public static Cell createAndPlaceFlopInlineOnTopPortInst(Design design, EDIFPortInst portInst, Pair<Site, BEL> loc,
                                                              EDIFHierNet clk) {
@@ -504,7 +519,8 @@ public class InlineFlopTools {
         }
     }
 
-    private static final Map<Series,String[]> staticPinsMap;
+    private static final Map<Series, String[]> staticPinsMap;
+
     static {
         staticPinsMap = new HashMap<>();
         staticPinsMap.put(Series.Series7, new String[]{"CE", "SR"});
@@ -531,7 +547,7 @@ public class InlineFlopTools {
      * example_outputs.* BOTTOM
      * </pre>
      *
-     * @param netlist The netlist that the side map will be created for.
+     * @param netlist  The netlist that the side map will be created for.
      * @param filename The name of the input side map file.
      * @return A map from EDIFPort to the PBlockSide the inline flop should be placed on.
      */
@@ -560,7 +576,8 @@ public class InlineFlopTools {
 
     public static void main(String[] args) {
         if (args.length < 3 || args.length > 4) {
-            System.out.println("USAGE (to add flops)   : <input.dcp> <output.dcp> " + CLK_OPT + "=<clkName> " + PBLOCK_OPT + "=<pblock range(s)>");
+            System.out.println(
+                    "USAGE (to add flops)   : <input.dcp> <output.dcp> " + CLK_OPT + "=<clkName> " + PBLOCK_OPT + "=<pblock range(s)>");
             System.out.println("USAGE (to remove flops): <input.dcp> <output.dcp> " + REMOVE_FLOPS_OPT);
             return;
         }
