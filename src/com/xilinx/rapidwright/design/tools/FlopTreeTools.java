@@ -33,7 +33,11 @@ import com.xilinx.rapidwright.device.SiteTypeEnum;
 import com.xilinx.rapidwright.device.Tile;
 import com.xilinx.rapidwright.eco.ECOPlacementHelper;
 import com.xilinx.rapidwright.eco.ECOTools;
-import com.xilinx.rapidwright.edif.*;
+import com.xilinx.rapidwright.edif.EDIFHierCellInst;
+import com.xilinx.rapidwright.edif.EDIFHierNet;
+import com.xilinx.rapidwright.edif.EDIFHierPortInst;
+import com.xilinx.rapidwright.edif.EDIFNet;
+import com.xilinx.rapidwright.edif.EDIFTools;
 import com.xilinx.rapidwright.placer.blockplacer.Point;
 import com.xilinx.rapidwright.util.Pair;
 import org.jetbrains.annotations.NotNull;
@@ -157,6 +161,22 @@ public class FlopTreeTools {
         return quadrants;
     }
 
+    private static Map<SLR, List<EDIFHierPortInst>> splitPortInstsBySLR(Design design,
+                                                                        List<EDIFHierPortInst> portInsts) {
+        Map<SLR, List<EDIFHierPortInst>> portInstMap = new HashMap<>();
+
+        for (EDIFHierPortInst portInst : portInsts) {
+            Cell cell = design.getCell(portInst.getFullHierarchicalInstName());
+            if (cell != null && cell.isPlaced()) {
+                Tile t = cell.getTile();
+                SLR slr = t.getSLR();
+                portInstMap.computeIfAbsent(slr, k -> new ArrayList<>()).add(portInst);
+            }
+        }
+
+        return portInstMap;
+    }
+
     private static Pair<Site, BEL> nextAvailFlopPlacement(Design design, Iterator<Site> itr, SLR slr) {
         while (itr.hasNext()) {
             Site curr = itr.next();
@@ -198,12 +218,10 @@ public class FlopTreeTools {
         return new Pair<>(centroid, flopNetPair.getSecond());
     }
 
-    public static void insertFlopTreeForNet(Design design, String netName, String clkName, int depth) {
+    private static void insertFlopTreeForNetInSLR(Design design, SLR slr, String netName, String clkName, int depth,
+                                                  List<EDIFHierPortInst> sinkHierPortInsts,
+                                                  Set<SiteInst> siteInstsToRoute) {
         Net topNet = design.getNet(netName);
-        List<EDIFHierPortInst> sinkHierPortInsts = topNet.getLogicalHierNet().getLeafHierPortInsts(false);
-
-        Set<SiteInst> siteInstsToRoute = new HashSet<>();
-
         List<Pair<Net, List<EDIFHierPortInst>>> currPortInstList = new ArrayList<>();
         currPortInstList.add(new Pair<>(topNet, sinkHierPortInsts));
 
@@ -214,7 +232,7 @@ public class FlopTreeTools {
             for (Pair<Net, List<EDIFHierPortInst>> pair : currPortInstList) {
                 Net net = pair.getFirst();
                 List<EDIFHierPortInst> portInsts = pair.getSecond();
-                String newNetName = netName + "_d" + currDepth + "_" + i;
+                String newNetName = netName + "_slr" + slr.getId() + "_d" + currDepth + "_" + i;
                 Pair<Site, Net> centroidNetPair = placeFlopNearCentroidOfPortInsts(design, clkName, net, newNetName,
                         portInsts, siteInstsToRoute);
 
@@ -228,6 +246,116 @@ public class FlopTreeTools {
             }
             currPortInstList = nextPortInstList;
             nextPortInstList = new ArrayList<>();
+        }
+    }
+
+    private static Site getNearestValidSite(Design design, int row, int col) {
+        List<Point> points = new ArrayList<>();
+        Point p = new Point(col, row);
+        points.add(p);
+
+        return ECOPlacementHelper.getCentroidOfPoints(design.getDevice(), points, VALID_CENTROID_SITE_TYPES);
+    }
+
+    private static Net insertSLRCrossing(Design design, Net net, String clkName,
+                                         List<EDIFHierPortInst> otherSLRPortInsts, Set<SiteInst> siteInstsToRoute) {
+        Cell sourceCell = net.getLogicalHierNet().getSourcePortInsts(false).get(0).getPhysicalCell(design);
+        Site sourceSite = sourceCell.getSite();
+        SLR sourceSLR = sourceSite.getTile().getSLR();
+        int sourceRow = sourceSite.getTile().getRow();
+        int sourceCol = sourceSite.getTile().getColumn();
+
+        int newFirstSLRRow = sourceSLR.getLowerRight().getRow();
+
+        Site firstSLRSite = getNearestValidSite(design, newFirstSLRRow, sourceCol);
+        Iterator<Site> siteItr = ECOPlacementHelper.spiralOutFrom(firstSLRSite).iterator();
+        Pair<Site, BEL> loc = nextAvailFlopPlacement(design, siteItr, null);
+
+        Pair<Cell, Net> topNetCellPair = createAndPlaceFlopForTree(design, net.getLogicalHierNet(),
+                "test_slr_crossing_top", loc,
+                design.getNet(clkName).getLogicalHierNet(), otherSLRPortInsts);
+
+        siteInstsToRoute.add(topNetCellPair.getFirst().getSiteInst());
+
+        // Distance approx. 87 rows for SLL length
+        int newSecondSLRRow = newFirstSLRRow + 87;
+        Site secondSLRSite = getNearestValidSite(design, newSecondSLRRow, sourceCol);
+        siteItr = ECOPlacementHelper.spiralOutFrom(secondSLRSite).iterator();
+        loc = nextAvailFlopPlacement(design, siteItr, null);
+
+        Pair<Cell, Net> bottomNetCellPair = createAndPlaceFlopForTree(design,
+                topNetCellPair.getSecond().getLogicalHierNet(), "test_slr_crossing_top_2", loc,
+                design.getNet(clkName).getLogicalHierNet(), otherSLRPortInsts);
+
+        siteInstsToRoute.add(bottomNetCellPair.getFirst().getSiteInst());
+
+        return bottomNetCellPair.getSecond();
+    }
+
+    private static Net insertFlopChain(Design design, Net net, String clkName, int depth,
+                                       List<EDIFHierPortInst> portInsts, Set<SiteInst> siteInstsToRoute) {
+        Cell sourceCell = net.getLogicalHierNet().getSourcePortInsts(false).get(0).getPhysicalCell(design);
+        Site sourceSite = sourceCell.getSite();
+        Site portInstCentroid = findCentroidOfPortInsts(design, portInsts);
+
+        List<Point> points = new ArrayList<>();
+        points.add(new Point(portInstCentroid.getTile().getColumn(), portInstCentroid.getTile().getColumn()));
+        points.add(new Point(sourceSite.getTile().getColumn(), sourceSite.getTile().getColumn()));
+
+        Site midPoint = ECOPlacementHelper.getCentroidOfPoints(design.getDevice(), points, VALID_CENTROID_SITE_TYPES);
+
+        Iterator<Site> siteItr = ECOPlacementHelper.spiralOutFrom(midPoint).iterator();
+        Pair<Site, BEL> loc = nextAvailFlopPlacement(design, siteItr, null);
+
+        Pair<Cell, Net> netCellPair = createAndPlaceFlopForTree(design, net.getLogicalHierNet(),
+                net.getName() + "_ff0", loc,
+                design.getNet(clkName).getLogicalHierNet(), portInsts);
+
+        siteInstsToRoute.add(netCellPair.getFirst().getSiteInst());
+
+
+        return netCellPair.getSecond();
+    }
+
+    public static void insertFlopTreeForNet(Design design, String netName, String clkName, int depth,
+                                            int maxDepthPerSLR) {
+        Net topNet = design.getNet(netName);
+        List<EDIFHierPortInst> sinkHierPortInsts = topNet.getLogicalHierNet().getLeafHierPortInsts(false);
+        Set<SiteInst> siteInstsToRoute = new HashSet<>();
+
+        Map<SLR, List<EDIFHierPortInst>> slrPortInstMap = splitPortInstsBySLR(design, sinkHierPortInsts);
+        List<EDIFHierPortInst> sourcePortInsts = topNet.getLogicalHierNet().getSourcePortInsts(false);
+        if (sourcePortInsts.isEmpty()) {
+            throw new RuntimeException("Net " + netName + " does not have a source");
+        }
+        if (sourcePortInsts.size() > 1) {
+            throw new RuntimeException("Net " + netName + " has multiple sources");
+        }
+        EDIFHierPortInst sourcePortInst = sourcePortInsts.get(0);
+        Cell sourceCell = sourcePortInst.getPhysicalCell(design);
+        if (sourceCell == null || !sourceCell.isPlaced()) {
+            throw new RuntimeException("Source cell of net " + netName + " must be placed to create flop tree");
+        }
+        Site sourceSite = sourceCell.getSite();
+        SLR sourceSLR = sourceSite.getTile().getSLR();
+
+        for (Map.Entry<SLR, List<EDIFHierPortInst>> slrPortInsts : slrPortInstMap.entrySet()) {
+            SLR slr = slrPortInsts.getKey();
+            List<EDIFHierPortInst> portInsts = slrPortInsts.getValue();
+            int slrDistFromSource = Math.abs(slr.getId() - sourceSLR.getId());
+            int newDepth = depth - (2 * slrDistFromSource); // Assume 2 registers to cross SLRs for now
+
+            Net slrCrossedNet = topNet;
+            if (slrDistFromSource > 0) {
+                slrCrossedNet = insertSLRCrossing(design, topNet, clkName, portInsts, siteInstsToRoute);
+            }
+            if (newDepth > maxDepthPerSLR) {
+                slrCrossedNet = insertFlopChain(design, slrCrossedNet, clkName, newDepth - maxDepthPerSLR, portInsts,
+                        siteInstsToRoute);
+                newDepth = maxDepthPerSLR;
+            }
+            insertFlopTreeForNetInSLR(design, slr, slrCrossedNet.getName(), clkName, newDepth, portInsts,
+                    siteInstsToRoute);
         }
 
         for (SiteInst si : siteInstsToRoute) {
@@ -244,7 +372,7 @@ public class FlopTreeTools {
         Design d = Design.readCheckpoint(args[0]);
 
         EDIFTools.uniqueifyNetlist(d);
-        insertFlopTreeForNet(d, args[2], args[3], 3);
+        insertFlopTreeForNet(d, args[2], args[3], 4, 3);
 
 
 //        PartialRouter.routeDesignWithUserDefinedArguments(d,
