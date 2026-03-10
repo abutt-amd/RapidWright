@@ -53,6 +53,7 @@ import java.util.Map;
 import java.util.PriorityQueue;
 import java.util.Queue;
 import java.util.Set;
+import java.util.stream.Collectors;
 
 import static com.xilinx.rapidwright.rwroute.RouterHelper.projectInputPinToINTNode;
 
@@ -120,8 +121,9 @@ public class HoldFixer {
     private static RouteThru nextAvailRouteThru(Design design, Iterator<Site> itr) {
         while (itr.hasNext()) {
             Site curr = itr.next();
+            List<SitePinInst> gndSources = design.getGndNet().getAlternateSources().stream().filter((src) -> src.getSite() == curr).collect(Collectors.toList());
             SiteInst candidate = design.getSiteInstFromSite(curr);
-            if (candidate == null) {
+            if (candidate == null && gndSources.isEmpty()) {
                 SiteInst siteInst = design.createSiteInst(curr);
                 SitePinInst a6 = new SitePinInst("A6", siteInst);
                 SitePinInst ao = new SitePinInst("A_O", siteInst);
@@ -473,8 +475,8 @@ public class HoldFixer {
             if (wirelengthMap.containsKey(sinkNode)) {
                 long routeWirelength = wirelengthMap.get(sinkNode).longValue();
                 sinkNodeWirelength.put(sink, new Pair<>(sinkNode, routeWirelength));
-            } else {
-                System.out.println("WARNING: net " + net.getName() + " not fully routed");
+//            } else {
+//                System.out.println("WARNING: net " + net.getName() + " not fully routed");
             }
         }
 
