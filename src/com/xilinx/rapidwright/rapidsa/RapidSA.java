@@ -23,8 +23,12 @@
 
 package com.xilinx.rapidwright.rapidsa;
 
+import com.xilinx.rapidwright.device.Part;
+import com.xilinx.rapidwright.device.PartNameTools;
+
 public class RapidSA {
     public static void main(String[] args) {
-
+        Part part = PartNameTools.getPart("xcv80-lsva4737-2MHP-e-S");
+        RapidSAPrecompile.precompileRapidSAComponents("RapidSA", part, 2.0);
     }
 }

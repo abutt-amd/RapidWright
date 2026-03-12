@@ -23,10 +23,21 @@
 
 package com.xilinx.rapidwright.rapidsa.components;
 
+import com.xilinx.rapidwright.design.Design;
+import com.xilinx.rapidwright.design.blocks.PBlock;
+import com.xilinx.rapidwright.design.blocks.PBlockSide;
+import com.xilinx.rapidwright.edif.EDIFPort;
+
 import java.util.List;
+import java.util.Map;
 
 public interface RapidComponent {
     String getComponentName();
     List<String> getVerilogFiles();
     String getTopVerilogName();
+    Map<String, String> getParameterMap();
+    String getClkName();
+    String getResetName();
+    PBlock getPBlock();
+    Map<EDIFPort, PBlockSide> getSideMap(Design d);
 }

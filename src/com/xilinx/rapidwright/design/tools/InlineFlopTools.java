@@ -552,8 +552,26 @@ public class InlineFlopTools {
      * @return A map from EDIFPort to the PBlockSide the inline flop should be placed on.
      */
     public static Map<EDIFPort, PBlockSide> parseSideMap(EDIFNetlist netlist, String filename) {
-        Map<EDIFPort, PBlockSide> externalRoutabilitySideMap = new HashMap<>();
         List<String> lines = FileTools.getLinesFromTextFile(filename);
+        return parseSideMap(netlist, lines);
+    }
+
+    /**
+     * Parses the PBlock side map into a map from EDIFPorts to PBlockSide enums. The input file should be made up of
+     * some number of lines where each line contains a port name regex and a PBlockSide separated by a space. An
+     * example file:
+     * <pre>
+     * example_inputs.* TOP
+     * reset LEFT
+     * example_outputs.* BOTTOM
+     * </pre>
+     *
+     * @param netlist  The netlist that the side map will be created for.
+     * @param lines    The lines to be parsed into a map.
+     * @return A map from EDIFPort to the PBlockSide the inline flop should be placed on.
+     */
+    public static Map<EDIFPort, PBlockSide> parseSideMap(EDIFNetlist netlist, List<String> lines) {
+        Map<EDIFPort, PBlockSide> externalRoutabilitySideMap = new HashMap<>();
 
         for (String line : lines) {
             String[] splitLine = line.split("\\s+");
