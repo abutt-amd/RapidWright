@@ -23,26 +23,6 @@
 
 package com.xilinx.rapidwright.design.tools;
 
-import java.io.IOException;
-import java.nio.file.Files;
-import java.nio.file.Path;
-import java.nio.file.Paths;
-import java.util.ArrayList;
-import java.util.Collection;
-import java.util.Collections;
-import java.util.Comparator;
-import java.util.HashMap;
-import java.util.HashSet;
-import java.util.LinkedHashMap;
-import java.util.LinkedList;
-import java.util.List;
-import java.util.Map;
-import java.util.Objects;
-import java.util.Queue;
-import java.util.Set;
-import java.util.stream.Collectors;
-import java.util.stream.Stream;
-
 import com.xilinx.rapidwright.design.Cell;
 import com.xilinx.rapidwright.design.ClockTools;
 import com.xilinx.rapidwright.design.Design;
@@ -78,9 +58,7 @@ import com.xilinx.rapidwright.edif.EDIFPort;
 import com.xilinx.rapidwright.edif.EDIFPortInst;
 import com.xilinx.rapidwright.edif.EDIFTools;
 import com.xilinx.rapidwright.edif.EDIFValueType;
-import com.xilinx.rapidwright.gui.NetlistBrowser;
 import com.xilinx.rapidwright.rwroute.HoldFixer;
-import com.xilinx.rapidwright.rwroute.PartialCUFR;
 import com.xilinx.rapidwright.rwroute.PartialRouter;
 import com.xilinx.rapidwright.tests.CodePerfTracker;
 import com.xilinx.rapidwright.util.FileTools;
@@ -88,8 +66,25 @@ import com.xilinx.rapidwright.util.MessageGenerator;
 import com.xilinx.rapidwright.util.Pair;
 import com.xilinx.rapidwright.util.PerformanceExplorer;
 import com.xilinx.rapidwright.util.VivadoTools;
-
 import joptsimple.OptionParser;
+
+import java.io.IOException;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.nio.file.Paths;
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.Comparator;
+import java.util.HashMap;
+import java.util.HashSet;
+import java.util.LinkedHashMap;
+import java.util.LinkedList;
+import java.util.List;
+import java.util.Map;
+import java.util.Queue;
+import java.util.Set;
+import java.util.stream.Collectors;
+import java.util.stream.Stream;
 
 import static com.xilinx.rapidwright.util.ArrayBuilderSLRCrossingCreator.getBlackBoxToTopLevelMap;
 import static com.xilinx.rapidwright.util.Utils.isBRAM;
@@ -137,6 +132,8 @@ public class ArrayBuilder {
         modInstNames = new ArrayList<>();
         modules = new ArrayList<>();
         this.config = config;
+        this.t = new CodePerfTracker(ArrayBuilder.class.getName());
+        this.t.start("Init");
     }
 
     public ArrayBuilder(ArrayBuilderConfig config, CodePerfTracker t) {
@@ -202,7 +199,7 @@ public class ArrayBuilder {
         return newPlacementMap;
     }
 
-    private void initializeArrayBuilder() {
+    public void initializeArrayBuilder() {
         assert (config.getKernelDesign() != null);
 
         kernelDesign = config.getKernelDesign();

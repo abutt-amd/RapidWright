@@ -78,7 +78,7 @@ public class SAControlFSM implements RapidComponent {
     public PBlock getPBlock() {
         Device device = Device.getDevice("xcv80-lsva4737-2MHP-e-S");
         return new PBlock(device,
-                "SLICE_X104Y808:SLICE_X111Y811");
+                "SLICE_X72Y704:SLICE_X83Y715");
     }
 
     @Override

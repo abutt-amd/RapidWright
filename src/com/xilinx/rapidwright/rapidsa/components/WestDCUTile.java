@@ -37,44 +37,40 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 
-public class GEMMTile implements RapidComponent {
-    private final int width;
-    private final int height;
+public class WestDCUTile implements RapidComponent {
+    final private int height;
 
-    public GEMMTile(int width, int height) {
-        this.width = width;
+    public WestDCUTile(int height) {
         this.height = height;
     }
 
     @Override
     public String getComponentName() {
-        return "GEMMTile";
+        return "WestDCUTile";
     }
 
     @Override
     public List<String> getVerilogFiles() {
         String rapidWrightPath = FileTools.getRapidWrightPath();
-        if (rapidWrightPath == null) {
-            throw new RuntimeException("RAPIDWRIGHT_PATH is null");
-        }
         String rapidSAVerilogPath = rapidWrightPath + File.separator + "rapidsa-rtl" +
                 File.separator + "os-sources" + File.separator;
-        List<String> files = new java.util.ArrayList<>();
-        files.add(rapidSAVerilogPath + "pe.sv");
-        files.add(rapidSAVerilogPath + "tile.sv");
+        List<String> files = new ArrayList<>();
+        files.add(rapidSAVerilogPath + "fifo.sv");
+        files.add(rapidSAVerilogPath + "fifo_tile.sv");
+        files.add(rapidSAVerilogPath + "daisy_chain_loader.sv");
+        files.add(rapidSAVerilogPath + "dcu_fifo_tile.sv");
         return files;
     }
 
     @Override
     public String getTopVerilogName() {
-        return "tile";
+        return "dcu_fifo_tile";
     }
 
     @Override
     public Map<String, String> getParameterMap() {
         Map<String, String> parameterMap = new HashMap<>();
-        parameterMap.put("WIDTH", String.valueOf(width));
-        parameterMap.put("HEIGHT", String.valueOf(height));
+        parameterMap.put("NUM_UNITS", String.valueOf(height));
         return parameterMap;
     }
 
@@ -85,27 +81,25 @@ public class GEMMTile implements RapidComponent {
 
     @Override
     public String getResetName() {
-        return null;
+        return "rst_n";
     }
 
     @Override
     public PBlock getPBlock() {
         Device device = Device.getDevice("xcv80-lsva4737-2MHP-e-S");
         return new PBlock(device,
-                "DSP_X2Y398:DSP_X3Y405 SLICE_X104Y796:SLICE_X119Y811 " +
-                        "IRI_QUAD_X72Y3212:IRI_QUAD_X73Y3275 DSP58_CPLX_X1Y398:DSP58_CPLX_X1Y405");
+                "SLICE_X72Y880:SLICE_X79Y895");
     }
 
     @Override
     public Map<EDIFPort, PBlockSide> getSideMap(Design d) {
         List<String> lines = new ArrayList<>();
-        lines.add("north_inputs.* TOP");
-        lines.add("accum_shift LEFT");
-        lines.add("south_outputs.* BOTTOM");
-        lines.add("east_outputs.* RIGHT");
-        lines.add("west_inputs.* LEFT");
-        lines.add("accum_inputs.* TOP");
-        lines.add("accum_outputs.* BOTTOM");
+        lines.add("s_* TOP");
+        lines.add("rst_n TOP");
+        lines.add("m_* BOTTOM");
+        lines.add("rd_en TOP");
+        lines.add("dout RIGHT");
+        lines.add("dout_valid RIGHT");
         return InlineFlopTools.parseSideMap(d.getNetlist(), lines);
     }
 }

@@ -314,6 +314,9 @@ public class EDIFPortInst implements Comparable<EDIFPortInst> {
         os.write(indent);
         os.write(EXPORT_CONST_PORTREF);
         if (index == -1) {
+            if (getPort() == null) {
+                System.out.println();
+            }
              os.write(cache.getLegalEDIFName(getPort().getName()));
         }
         else {

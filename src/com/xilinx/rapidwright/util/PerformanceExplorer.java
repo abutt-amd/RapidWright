@@ -394,7 +394,7 @@ public class PerformanceExplorer {
         }
     }
 
-    public void explorePerformance() {
+    public boolean explorePerformance() {
         if (vivadoPath.equals(DEFAULT_VIVADO) && !FileTools.isVivadoOnPath()) {
             throw new RuntimeException("ERROR: Couldn't find \n"
                 + "    vivado on PATH, please update PATH or specify path with option -" + VIVADO_PATH_OPT);
@@ -479,6 +479,7 @@ public class PerformanceExplorer {
         boolean success = jobs.runAllToCompletion(maxConcurrentJobs);
 
         System.out.println("Performance Explorer " + (success ? "Finished Successfully." : "Failed!"));
+        return success;
     }
 
     private Float parseWNSFromTimingReport(Path timingReport) {

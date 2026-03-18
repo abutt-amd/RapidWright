@@ -29,8 +29,9 @@ import com.xilinx.rapidwright.design.blocks.PBlockSide;
 import com.xilinx.rapidwright.device.Part;
 import com.xilinx.rapidwright.edif.EDIFPort;
 import com.xilinx.rapidwright.edif.EDIFTools;
+import com.xilinx.rapidwright.rapidsa.components.NorthDCUTile;
 import com.xilinx.rapidwright.rapidsa.components.RapidComponent;
-import com.xilinx.rapidwright.rapidsa.components.SAControlFSM;
+import com.xilinx.rapidwright.rapidsa.components.WestDCUTile;
 import com.xilinx.rapidwright.util.FileTools;
 import com.xilinx.rapidwright.util.PerformanceExplorer;
 import com.xilinx.rapidwright.util.PlacerDirective;
@@ -69,7 +70,9 @@ public class RapidSAPrecompile {
     private static final List<RapidComponent> COMPONENTS = Collections.unmodifiableList(
             Arrays.asList(
 //                    new GEMMTile(4, 4),
-                    new SAControlFSM()
+                    new NorthDCUTile(4),
+                    new WestDCUTile(4)
+//                    new SAControlFSM()
             )
     );
 
@@ -161,7 +164,11 @@ public class RapidSAPrecompile {
             pblocks.put(component.getPBlock(), null);
             pe.setPBlocks(pblocks);
 
-            pe.explorePerformance();
+            boolean success = pe.explorePerformance();
+
+            if (!success) {
+                throw new RuntimeException("PerformanceExplorer failed in RapidSA");
+            }
 
             pe.getBestDesignPerPBlock();
             try {
