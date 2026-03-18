@@ -57,14 +57,15 @@ public class NorthDCUTile implements RapidComponent {
         List<String> files = new java.util.ArrayList<>();
         files.add(rapidSAVerilogPath + "fifo.sv");
         files.add(rapidSAVerilogPath + "fifo_tile.sv");
+        files.add(rapidSAVerilogPath + "skid_buffer.sv");
         files.add(rapidSAVerilogPath + "daisy_chain_loader.sv");
-        files.add(rapidSAVerilogPath + "dcu_fifo_tile.sv");
+        files.add(rapidSAVerilogPath + "dcu_fifo_tile_north.sv");
         return files;
     }
 
     @Override
     public String getTopVerilogName() {
-        return "dcu_fifo_tile";
+        return "dcu_fifo_tile_north";
     }
 
     @Override
@@ -95,12 +96,12 @@ public class NorthDCUTile implements RapidComponent {
     @Override
     public Map<EDIFPort, PBlockSide> getSideMap(Design d) {
         List<String> lines = new ArrayList<>();
-        lines.add("s_* LEFT");
+        lines.add("s_.* LEFT");
         lines.add("rst_n LEFT");
-        lines.add("m_* RIGHT");
+        lines.add("m_.* RIGHT");
         lines.add("rd_en LEFT");
-        lines.add("dout BOTTOM");
-        lines.add("dout_valid BOTTOM");
-        return InlineFlopTools.parseSideMap(d.getNetlist(), lines);
+        lines.add("dout.* BOTTOM");
+        Map<EDIFPort, PBlockSide> map = InlineFlopTools.parseSideMap(d.getNetlist(), lines);
+        return map;
     }
 }

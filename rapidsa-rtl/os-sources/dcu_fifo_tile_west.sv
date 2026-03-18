@@ -1,6 +1,6 @@
 `timescale 1ns / 1ps
 
-module dcu_fifo_tile #(
+module dcu_fifo_tile_west #(
     parameter DATA_WIDTH = 8,
     parameter TAG_WIDTH = 8,
     parameter NUM_UNITS = 4,
@@ -25,10 +25,17 @@ module dcu_fifo_tile #(
     output logic                  dout_valid [NUM_UNITS-1:0]
 );
 
+    // Chain wires into each DCU stage (after skid buffers)
     logic [DATA_WIDTH-1:0] chain_data  [NUM_UNITS:0];
     logic [TAG_WIDTH-1:0]  chain_tag   [NUM_UNITS:0];
     logic                  chain_valid [NUM_UNITS:0];
     logic                  chain_ready [NUM_UNITS:0];
+
+    // Raw wires out of each DCU stage (before skid buffers)
+    logic [DATA_WIDTH-1:0] raw_data  [NUM_UNITS-1:0];
+    logic [TAG_WIDTH-1:0]  raw_tag   [NUM_UNITS-1:0];
+    logic                  raw_valid [NUM_UNITS-1:0];
+    logic                  raw_ready [NUM_UNITS-1:0];
 
     logic [DATA_WIDTH-1:0] fifo_wdata [NUM_UNITS-1:0];
     logic                  fifo_wen   [NUM_UNITS-1:0];
@@ -59,16 +66,30 @@ module dcu_fifo_tile #(
                 .s_tag(chain_tag[i]),
                 .s_valid(chain_valid[i]),
                 .s_ready(chain_ready[i]),
-                .m_data(chain_data[i+1]),
-                .m_tag(chain_tag[i+1]),
-                .m_valid(chain_valid[i+1]),
-                .m_ready(chain_ready[i+1]),
+                .m_data(raw_data[i]),
+                .m_tag(raw_tag[i]),
+                .m_valid(raw_valid[i]),
+                .m_ready(raw_ready[i]),
                 .fifo_wdata(fifo_wdata[i]),
                 .fifo_wen(fifo_wen[i]),
                 .fifo_full(fifo_full[i])
             );
 
             assign fifo_full[i] = fifo_full_internal[i];
+
+            // Skid buffer breaks the ready/valid combinational chain between stages
+            skid_buffer #(
+                .WIDTH(DATA_WIDTH + TAG_WIDTH)
+            ) u_skid (
+                .clk(clk),
+                .rst_n(rst_n),
+                .s_data({raw_data[i], raw_tag[i]}),
+                .s_valid(raw_valid[i]),
+                .s_ready(raw_ready[i]),
+                .m_data({chain_data[i+1], chain_tag[i+1]}),
+                .m_valid(chain_valid[i+1]),
+                .m_ready(chain_ready[i+1])
+            );
         end
     endgenerate
 

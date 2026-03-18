@@ -41,12 +41,14 @@ import com.xilinx.rapidwright.design.blocks.PBlockGenerator;
 import com.xilinx.rapidwright.design.blocks.PBlockRange;
 import com.xilinx.rapidwright.design.blocks.PBlockSide;
 import com.xilinx.rapidwright.device.BEL;
+import com.xilinx.rapidwright.device.SiteTypeEnum;
 import com.xilinx.rapidwright.device.ClockRegion;
 import com.xilinx.rapidwright.device.Device;
 import com.xilinx.rapidwright.device.SLR;
 import com.xilinx.rapidwright.device.Series;
 import com.xilinx.rapidwright.device.Site;
 import com.xilinx.rapidwright.device.Tile;
+import com.xilinx.rapidwright.eco.ECOPlacementHelper;
 import com.xilinx.rapidwright.edif.EDIFCell;
 import com.xilinx.rapidwright.edif.EDIFCellInst;
 import com.xilinx.rapidwright.edif.EDIFDirection;
@@ -57,6 +59,7 @@ import com.xilinx.rapidwright.edif.EDIFNetlist;
 import com.xilinx.rapidwright.edif.EDIFPort;
 import com.xilinx.rapidwright.edif.EDIFPortInst;
 import com.xilinx.rapidwright.edif.EDIFTools;
+import com.xilinx.rapidwright.placer.blockplacer.Point;
 import com.xilinx.rapidwright.edif.EDIFValueType;
 import com.xilinx.rapidwright.rwroute.HoldFixer;
 import com.xilinx.rapidwright.rwroute.PartialRouter;
@@ -72,6 +75,7 @@ import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
+import java.util.Arrays;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.Comparator;
@@ -97,6 +101,9 @@ import static com.xilinx.rapidwright.util.Utils.isSLICE;
  */
 public class ArrayBuilder {
 
+    private static final Set<SiteTypeEnum> VALID_CENTROID_SITE_TYPES =
+            new HashSet<>(Arrays.asList(SiteTypeEnum.SLICEL, SiteTypeEnum.SLICEM));
+
     private Design kernelDesign;
 
     private Design topDesign;
@@ -119,6 +126,8 @@ public class ArrayBuilder {
 
     private Map<ModuleInst, Site> newPlacementMap;
 
+    private Map<Pair<Integer, Integer>, Site> logicalToCentroidMap;
+
     private List<Module> modules;
 
     private Module slrCrossingModule;
@@ -129,6 +138,7 @@ public class ArrayBuilder {
 
     public ArrayBuilder(ArrayBuilderConfig config) {
         newPlacementMap = new HashMap<>();
+        logicalToCentroidMap = new HashMap<>();
         modInstNames = new ArrayList<>();
         modules = new ArrayList<>();
         this.config = config;
@@ -197,6 +207,20 @@ public class ArrayBuilder {
 
     private Map<ModuleInst, Site> getNewPlacementMap() {
         return newPlacementMap;
+    }
+
+    public Map<Pair<Integer, Integer>, Site> getLogicalToCentroidMap() {
+        return logicalToCentroidMap;
+    }
+
+    private Site getModuleInstCentroid(ModuleInst mi) {
+        List<Point> points = new ArrayList<>();
+        for (SiteInst si : mi.getSiteInsts()) {
+            Tile t = si.getTile();
+            points.add(new Point(t.getColumn(), t.getRow()));
+        }
+        return ECOPlacementHelper.getCentroidOfPoints(
+                array.getDevice(), points, VALID_CENTROID_SITE_TYPES);
     }
 
     public void initializeArrayBuilder() {
@@ -770,6 +794,9 @@ public class ArrayBuilder {
                                 placed = true;
                                 boundingBoxes.add(newBoundingBox);
                                 newPlacementMap.put(curr, anchor);
+                                Site centroid = getModuleInstCentroid(curr);
+                                logicalToCentroidMap.put(new Pair<>(x, y), centroid);
+                                logicalToCentroidMap.put(new Pair<>(x, y + 1), centroid);
                                 System.out.println("  ** PLACED: " + numPlaced + " " + anchor + " " + curr.getName()
                                         + " " + curr.getAnchor().getTile().getSLR());
                                 numPlaced += 2;
@@ -787,6 +814,7 @@ public class ArrayBuilder {
                                 placed = true;
                                 boundingBoxes.add(newBoundingBox);
                                 newPlacementMap.put(curr, anchor);
+                                logicalToCentroidMap.put(new Pair<>(x, y), getModuleInstCentroid(curr));
                                 idealToPhysicalPlacementMap.put(new Pair<>(x, y), new Pair<>(physX, physY));
                                 System.out.println("  ** PLACED: " + numPlaced + " " + anchor + " " + curr.getName()
                                         + " " + curr.getAnchor().getTile().getSLR());

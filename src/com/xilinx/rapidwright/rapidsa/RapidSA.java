@@ -23,11 +23,18 @@
 
 package com.xilinx.rapidwright.rapidsa;
 
+import com.xilinx.rapidwright.design.Cell;
 import com.xilinx.rapidwright.design.Design;
+import com.xilinx.rapidwright.design.Module;
+import com.xilinx.rapidwright.design.ModuleInst;
+import com.xilinx.rapidwright.design.Net;
+import com.xilinx.rapidwright.design.RelocatableTileRectangle;
+import com.xilinx.rapidwright.design.SiteInst;
 import com.xilinx.rapidwright.design.tools.ArrayBuilder;
 import com.xilinx.rapidwright.design.tools.ArrayBuilderConfig;
 import com.xilinx.rapidwright.device.Part;
 import com.xilinx.rapidwright.device.PartNameTools;
+import com.xilinx.rapidwright.device.Site;
 import com.xilinx.rapidwright.edif.EDIFCell;
 import com.xilinx.rapidwright.edif.EDIFCellInst;
 import com.xilinx.rapidwright.edif.EDIFNetlist;
@@ -37,14 +44,37 @@ import com.xilinx.rapidwright.rapidsa.components.NorthDCUTile;
 import com.xilinx.rapidwright.rapidsa.components.RapidComponent;
 import com.xilinx.rapidwright.rapidsa.components.SAControlFSM;
 import com.xilinx.rapidwright.rapidsa.components.WestDCUTile;
+import com.xilinx.rapidwright.util.Pair;
+import joptsimple.OptionParser;
 
 import java.io.File;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.Map;
 
 public class RapidSA {
     public static void main(String[] args) {
         String partName = "xcv80-lsva4737-2MHP-e-S";
         Part part = PartNameTools.getPart(partName);
-        //RapidSAPrecompile.precompileRapidSAComponents("RapidSA", part, 2.0);
+
+        OptionParser parser = new OptionParser();
+        parser.accepts("precompile", "Run precompilation of all RapidSA components and exit");
+        parser.accepts("help", "Print help message");
+        joptsimple.OptionSet options = parser.parse(args);
+
+        if (options.has("help")) {
+            try {
+                parser.printHelpOn(System.out);
+            } catch (java.io.IOException e) {
+                e.printStackTrace();
+            }
+            return;
+        }
+
+        if (options.has("precompile")) {
+            RapidSAPrecompile.precompileRapidSAComponents("RapidSA", part, 2.0);
+            return;
+        }
 
         Design sa = RapidSANetlistBuilder.createSystolicArrayNetlist(8, 8, partName, "RapidSA");
 
@@ -68,14 +98,267 @@ public class RapidSA {
 
         ab.createArray();
 
-        // Fill remaining black boxes with their synthesized netlists
+        // Place NorthDCU tiles above the array
+        Module northDcuModule = loadRelocatableModule("RapidSA", new NorthDCUTile(8), ab.getArray());
+        placeNorthDCUTiles(ab, 8, northDcuModule);
+
+        // Place WestDCU tiles left of the array
+        Module westDcuModule = loadRelocatableModule("RapidSA", new WestDCUTile(8), ab.getArray());
+        placeWestDCUTiles(ab, 8, westDcuModule);
+
+        // Place SA FSM near top-left of the design
+        Module fsmModule = loadRelocatableModule("RapidSA", new SAControlFSM(), ab.getArray());
+        placeFSM(ab, fsmModule);
+
         Design arrayDesign = ab.getArray();
-        fillBlackBox(arrayDesign, "RapidSA", new NorthDCUTile(8), "north_dcu_x0");
-        fillBlackBox(arrayDesign, "RapidSA", new WestDCUTile(8), "west_dcu_y0");
-        fillBlackBox(arrayDesign, "RapidSA", new SAControlFSM(), "sa_fsm");
+
+        // Add clock constraint
+        arrayDesign.addXDCConstraint("create_clock -period 2.0 -name clk [get_ports clk]");
 
         arrayDesign.setDesignOutOfContext(true);
         arrayDesign.writeCheckpoint("systolic_array_8x8.dcp");
+    }
+
+    /**
+     * Loads a component's pnr.dcp and creates a relocatable Module, removing
+     * clock routing, BUFGs, and orphaned static tie-off cells that inflate
+     * the bounding box.
+     */
+    private static Module loadRelocatableModule(String precompileDir, RapidComponent component,
+                                                 Design targetDesign) {
+        String dcpPath = precompileDir + File.separator
+                + component.getComponentName() + File.separator + "pnr.dcp";
+        Design pnrDesign = Design.readCheckpoint(dcpPath);
+        EDIFTools.removeVivadoBusPreventionAnnotations(pnrDesign.getNetlist());
+        ArrayBuilder.removeBUFGs(pnrDesign);
+        Net clkNet = pnrDesign.getNet(component.getClkName());
+        if (clkNet != null) {
+            clkNet.unroute();
+        }
+        // Remove SiteInsts that only contain <LOCKED> cells or are static sources
+        List<SiteInst> toRemove = new ArrayList<>();
+        for (SiteInst si : pnrDesign.getSiteInsts()) {
+            if (si.getName().startsWith(SiteInst.STATIC_SOURCE)) {
+                toRemove.add(si);
+                continue;
+            }
+            boolean allLocked = !si.getCells().isEmpty();
+            for (Cell c : si.getCells()) {
+                if (!c.getName().equals("<LOCKED>")) {
+                    allLocked = false;
+                    break;
+                }
+            }
+            if (allLocked) {
+                toRemove.add(si);
+            }
+        }
+        for (SiteInst si : toRemove) {
+            pnrDesign.removeSiteInst(si);
+        }
+        Module module = new Module(pnrDesign);
+        module.calculateAllValidPlacements(targetDesign.getDevice());
+        return module;
+    }
+
+    /**
+     * Places NorthDCU module instances physically above the array,
+     * aligned with each column's top-row centroid.
+     */
+    private static void placeNorthDCUTiles(ArrayBuilder ab, int nCols, Module dcuModule) {
+        Design arrayDesign = ab.getArray();
+        Map<Pair<Integer, Integer>, Site> centroidMap = ab.getLogicalToCentroidMap();
+
+        RelocatableTileRectangle moduleBoundingBox = dcuModule.getBoundingBox();
+        List<RelocatableTileRectangle> placedBoundingBoxes = new ArrayList<>();
+
+        // Compute the array's top row from all placed sites
+        int arrayTopRow = Integer.MAX_VALUE;
+        for (SiteInst si : arrayDesign.getSiteInsts()) {
+            arrayTopRow = Math.min(arrayTopRow, si.getTile().getRow());
+        }
+
+        for (int col = 0; col < nCols; col++) {
+            Site targetCentroid = centroidMap.get(new Pair<>(col, 0));
+            String instName = "north_dcu_x" + col;
+
+            ModuleInst mi = arrayDesign.createModuleInst(instName, dcuModule);
+
+            Site bestAnchor = null;
+            int bestDist = Integer.MAX_VALUE;
+
+            for (Site anchor : dcuModule.getAllValidPlacements()) {
+                RelocatableTileRectangle candidateBB = moduleBoundingBox
+                        .getCorresponding(anchor.getTile(), dcuModule.getAnchor().getTile());
+
+                // Bottom of DCU bounding box must be above top of array
+                if (candidateBB.getMaxRow() >= arrayTopRow) {
+                    continue;
+                }
+
+                // Check no overlap with any placed bounding box
+                boolean overlaps = false;
+                for (RelocatableTileRectangle existing : placedBoundingBoxes) {
+                    if (existing.overlaps(candidateBB)) {
+                        overlaps = true;
+                        break;
+                    }
+                }
+                if (overlaps) continue;
+
+                int dist = Math.abs(anchor.getTile().getColumn() - targetCentroid.getTile().getColumn())
+                         + Math.abs(anchor.getTile().getRow() - targetCentroid.getTile().getRow());
+                if (dist < bestDist) {
+                    bestDist = dist;
+                    bestAnchor = anchor;
+                }
+            }
+
+            if (bestAnchor == null) {
+                throw new RuntimeException("Could not find valid placement for " + instName);
+            }
+
+            if (!mi.place(bestAnchor, true, false)) {
+                throw new RuntimeException("Failed to place " + instName + " at " + bestAnchor);
+            }
+
+            placedBoundingBoxes.add(moduleBoundingBox
+                    .getCorresponding(bestAnchor.getTile(), dcuModule.getAnchor().getTile()));
+
+            System.out.println("  ** PLACED NorthDCU: " + instName + " at " + bestAnchor);
+        }
+    }
+
+    /**
+     * Places WestDCU module instances physically left of the array,
+     * aligned with each row's first-column centroid.
+     */
+    private static void placeWestDCUTiles(ArrayBuilder ab, int nRows, Module dcuModule) {
+        Design arrayDesign = ab.getArray();
+        Map<Pair<Integer, Integer>, Site> centroidMap = ab.getLogicalToCentroidMap();
+
+        RelocatableTileRectangle moduleBoundingBox = dcuModule.getBoundingBox();
+        List<RelocatableTileRectangle> placedBoundingBoxes = new ArrayList<>();
+
+        // Compute the array's leftmost column from all placed sites
+        int arrayLeftCol = Integer.MAX_VALUE;
+        for (SiteInst si : arrayDesign.getSiteInsts()) {
+            arrayLeftCol = Math.min(arrayLeftCol, si.getTile().getColumn());
+        }
+
+        for (int row = 0; row < nRows; row++) {
+            Site targetCentroid = centroidMap.get(new Pair<>(0, row));
+            String instName = "west_dcu_y" + row;
+
+            ModuleInst mi = arrayDesign.createModuleInst(instName, dcuModule);
+
+            Site bestAnchor = null;
+            int bestDist = Integer.MAX_VALUE;
+
+            for (Site anchor : dcuModule.getAllValidPlacements()) {
+                RelocatableTileRectangle candidateBB = moduleBoundingBox
+                        .getCorresponding(anchor.getTile(), dcuModule.getAnchor().getTile());
+
+                // Right edge of DCU bounding box must be left of array
+                if (candidateBB.getMaxColumn() >= arrayLeftCol) {
+                    continue;
+                }
+
+                // Check no overlap with any placed bounding box
+                boolean overlaps = false;
+                for (RelocatableTileRectangle existing : placedBoundingBoxes) {
+                    if (existing.overlaps(candidateBB)) {
+                        overlaps = true;
+                        break;
+                    }
+                }
+                if (overlaps) continue;
+
+                int dist = Math.abs(anchor.getTile().getColumn() - targetCentroid.getTile().getColumn())
+                         + Math.abs(anchor.getTile().getRow() - targetCentroid.getTile().getRow());
+                if (dist < bestDist) {
+                    bestDist = dist;
+                    bestAnchor = anchor;
+                }
+            }
+
+            if (bestAnchor == null) {
+                throw new RuntimeException("Could not find valid placement for " + instName);
+            }
+
+            if (!mi.place(bestAnchor, true, false)) {
+                throw new RuntimeException("Failed to place " + instName + " at " + bestAnchor);
+            }
+
+            placedBoundingBoxes.add(moduleBoundingBox
+                    .getCorresponding(bestAnchor.getTile(), dcuModule.getAnchor().getTile()));
+
+            System.out.println("  ** PLACED WestDCU: " + instName + " at " + bestAnchor);
+        }
+    }
+
+    /**
+     * Places the SA FSM module instance near the top-left of the design,
+     * avoiding overlap with all existing placed modules.
+     */
+    private static void placeFSM(ArrayBuilder ab, Module fsmModule) {
+        Design arrayDesign = ab.getArray();
+
+        RelocatableTileRectangle moduleBoundingBox = fsmModule.getBoundingBox();
+
+        // Collect bounding boxes of all existing placed SiteInsts
+        // (GEMM tiles, NorthDCU, WestDCU are all placed by now)
+        int topLeftRow = Integer.MAX_VALUE;
+        int topLeftCol = Integer.MAX_VALUE;
+        List<RelocatableTileRectangle> placedBoundingBoxes = new ArrayList<>();
+        for (ModuleInst existingMi : arrayDesign.getModuleInsts()) {
+            if (existingMi.isPlaced()) {
+                RelocatableTileRectangle bb = existingMi.getModule().getBoundingBox()
+                        .getCorresponding(existingMi.getAnchor().getSite().getTile(),
+                                existingMi.getModule().getAnchor().getTile());
+                placedBoundingBoxes.add(bb);
+                topLeftRow = Math.min(topLeftRow, bb.getMinRow());
+                topLeftCol = Math.min(topLeftCol, bb.getMinColumn());
+            }
+        }
+
+        ModuleInst mi = arrayDesign.createModuleInst("sa_fsm", fsmModule);
+
+        // Find the valid placement closest to the top-left corner that doesn't overlap
+        Site bestAnchor = null;
+        int bestDist = Integer.MAX_VALUE;
+
+        for (Site anchor : fsmModule.getAllValidPlacements()) {
+            RelocatableTileRectangle candidateBB = moduleBoundingBox
+                    .getCorresponding(anchor.getTile(), fsmModule.getAnchor().getTile());
+
+            boolean overlaps = false;
+            for (RelocatableTileRectangle existing : placedBoundingBoxes) {
+                if (existing.overlaps(candidateBB)) {
+                    overlaps = true;
+                    break;
+                }
+            }
+            if (overlaps) continue;
+
+            // Manhattan distance from top-left corner of the design
+            int dist = Math.abs(anchor.getTile().getColumn() - topLeftCol)
+                     + Math.abs(anchor.getTile().getRow() - topLeftRow);
+            if (dist < bestDist) {
+                bestDist = dist;
+                bestAnchor = anchor;
+            }
+        }
+
+        if (bestAnchor == null) {
+            throw new RuntimeException("Could not find valid placement for sa_fsm");
+        }
+
+        if (!mi.place(bestAnchor, true, false)) {
+            throw new RuntimeException("Failed to place sa_fsm at " + bestAnchor);
+        }
+
+        System.out.println("  ** PLACED FSM: sa_fsm at " + bestAnchor);
     }
 
     /**
