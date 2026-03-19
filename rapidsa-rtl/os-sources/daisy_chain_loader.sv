@@ -3,10 +3,12 @@
 module daisy_chain_loader #(
     parameter DATA_WIDTH = 8,
     parameter TAG_WIDTH = 8,
-    parameter ID = 0
+    parameter ID_WIDTH = 8
 )(
     input logic clk,
     input logic rst_n,
+
+    input logic [ID_WIDTH-1:0]  id,
 
     input logic [DATA_WIDTH-1:0] s_data,
     input logic [TAG_WIDTH-1:0]  s_tag,
@@ -24,7 +26,7 @@ module daisy_chain_loader #(
 );
 
     logic tag_match;
-    assign tag_match = (s_tag == ID);
+    assign tag_match = (s_tag == id);
 
     logic [DATA_WIDTH-1:0] fwd_data_reg;
     logic [TAG_WIDTH-1:0]  fwd_tag_reg;

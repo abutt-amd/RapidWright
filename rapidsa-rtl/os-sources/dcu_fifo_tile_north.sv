@@ -5,6 +5,7 @@ module dcu_fifo_tile_north #(
     parameter TAG_WIDTH = 8,
     parameter NUM_UNITS = 4,
     parameter FIFO_PTR_SIZE = 6,
+    parameter ID_WIDTH = 8,
     parameter ID_OFFSET = 0
 )(
     input logic clk,
@@ -20,10 +21,17 @@ module dcu_fifo_tile_north #(
     output logic                  m_valid,
     input logic                   m_ready,
 
-    input logic                   rd_en      [NUM_UNITS-1:0],
+    input logic                   rd_en,
+    output logic                  rd_en_out,
     output logic [DATA_WIDTH-1:0] dout       [NUM_UNITS-1:0],
     output logic                  dout_valid [NUM_UNITS-1:0]
 );
+
+    // ID register initialized to ID_OFFSET, feeds back to itself
+    (* dont_touch = "true" *) logic [ID_WIDTH-1:0] id_reg = ID_OFFSET;
+    always_ff @(posedge clk) begin
+        id_reg <= id_reg;
+    end
 
     // Chain wires into each DCU stage (after skid buffers)
     logic [DATA_WIDTH-1:0] chain_data  [NUM_UNITS:0];
@@ -58,10 +66,11 @@ module dcu_fifo_tile_north #(
             daisy_chain_loader #(
                 .DATA_WIDTH(DATA_WIDTH),
                 .TAG_WIDTH(TAG_WIDTH),
-                .ID(ID_OFFSET + i)
+                .ID_WIDTH(ID_WIDTH)
             ) u_dcu (
                 .clk(clk),
                 .rst_n(rst_n),
+                .id(id_reg + ID_WIDTH'(i)),
                 .s_data(chain_data[i]),
                 .s_tag(chain_tag[i]),
                 .s_valid(chain_valid[i]),
@@ -93,6 +102,32 @@ module dcu_fifo_tile_north #(
         end
     endgenerate
 
+    // rd_en pipeline: input feeds unit 0, registered between each subsequent unit
+    logic rd_en_pipe [NUM_UNITS:0];
+    assign rd_en_pipe[0] = rd_en;
+
+    generate
+        for (i = 0; i < NUM_UNITS; i = i + 1) begin : gen_rd_en_pipe
+            always_ff @(posedge clk) begin
+                if (!rst_n)
+                    rd_en_pipe[i+1] <= 1'b0;
+                else
+                    rd_en_pipe[i+1] <= rd_en_pipe[i];
+            end
+        end
+    endgenerate
+
+    // Output rd_en is the last pipeline stage (already registered)
+    assign rd_en_out = rd_en_pipe[NUM_UNITS];
+
+    // Build rd_en array for fifo_tile from pipeline
+    logic rd_en_arr [NUM_UNITS-1:0];
+    generate
+        for (i = 0; i < NUM_UNITS; i = i + 1) begin : gen_rd_en_arr
+            assign rd_en_arr[i] = rd_en_pipe[i];
+        end
+    endgenerate
+
     logic [FIFO_PTR_SIZE:0] fifo_count [NUM_UNITS-1:0];
     logic                   fifo_full_internal [NUM_UNITS-1:0];
 
@@ -105,13 +140,12 @@ module dcu_fifo_tile_north #(
         .clk(clk),
         .wr_en(fifo_wen),
         .din(fifo_wdata),
-        .rd_en(rd_en),
+        .rd_en(rd_en_arr),
         .dout(dout),
         .count(fifo_count),
         .empty(fifo_empty),
         .full(fifo_full_internal)
     );
-
 
     generate
         for (i = 0; i < NUM_UNITS; i = i + 1) begin : gen_dout_valid
@@ -119,7 +153,7 @@ module dcu_fifo_tile_north #(
                 if (!rst_n) begin
                     dout_valid[i] <= 1'b0;
                 end else begin
-                    dout_valid[i] <= ~fifo_empty[i] && rd_en[i];
+                    dout_valid[i] <= ~fifo_empty[i] && rd_en_arr[i];
                 end
             end
         end

@@ -27,6 +27,7 @@ import com.xilinx.rapidwright.design.Design;
 import com.xilinx.rapidwright.design.blocks.PBlock;
 import com.xilinx.rapidwright.design.blocks.PBlockSide;
 import com.xilinx.rapidwright.design.tools.InlineFlopTools;
+import com.xilinx.rapidwright.design.tools.RegisterInitTools;
 import com.xilinx.rapidwright.device.Device;
 import com.xilinx.rapidwright.edif.EDIFPort;
 import com.xilinx.rapidwright.util.FileTools;
@@ -39,9 +40,21 @@ import java.util.Map;
 
 public class NorthDCUTile implements RapidComponent {
     final private int width;
+    private static final int ID_WIDTH = 8;
+    private static final String ID_REG_BASE_NAME = "id_reg_reg";
 
     public NorthDCUTile(int width) {
         this.width = width;
+    }
+
+    /**
+     * Updates the id_reg initialization value in a placed-and-routed design.
+     *
+     * @param design The pnr Design containing the id_reg flip-flops
+     * @param idValue The new ID value to initialize the register with
+     */
+    public static void setIdRegValue(Design design, int idValue) {
+        RegisterInitTools.setRegisterValue(design, ID_REG_BASE_NAME, idValue, ID_WIDTH);
     }
 
     @Override

@@ -83,6 +83,7 @@ public class RapidSANetlistBuilder {
     private static final String DCU_M_VALID    = "m_valid";
     private static final String DCU_M_READY    = "m_ready";
     private static final String DCU_RD_EN      = "rd_en";
+    private static final String DCU_RD_EN_OUT  = "rd_en_out";
     private static final String DCU_DOUT       = "dout";
     private static final String DCU_DOUT_VALID = "dout_valid";
 
@@ -246,19 +247,25 @@ public class RapidSANetlistBuilder {
             for (int c = 0; c < nCols; c++)
                 accumShiftNet.createPortInst(GEMM_ACCUM_SHIFT, gemmInsts[r][c]);
 
-        // FSM b_rd_en -> all NorthDCU rd_en elements
+        // FSM b_rd_en -> NorthDCU rd_en daisy chain
         EDIFNet bRdEnNet = topCell.createNet("b_rd_en");
         bRdEnNet.createPortInst(FSM_B_RD_EN, fsmInst);
-        for (int i = 0; i < nCols; i++)
-            for (int j = 0; j < numUnitsNorth; j++)
-                bRdEnNet.createPortInst(DCU_RD_EN + "[" + j + "]", northDcuInsts[i]);
+        bRdEnNet.createPortInst(DCU_RD_EN, northDcuInsts[0]);
+        for (int i = 0; i < nCols - 1; i++) {
+            EDIFNet rdEnChain = topCell.createNet("b_rd_en_chain_" + i + "_to_" + (i + 1));
+            rdEnChain.createPortInst(DCU_RD_EN_OUT, northDcuInsts[i]);
+            rdEnChain.createPortInst(DCU_RD_EN, northDcuInsts[i + 1]);
+        }
 
-        // FSM a_rd_en -> all WestDCU rd_en elements
+        // FSM a_rd_en -> WestDCU rd_en daisy chain
         EDIFNet aRdEnNet = topCell.createNet("a_rd_en");
         aRdEnNet.createPortInst(FSM_A_RD_EN, fsmInst);
-        for (int i = 0; i < nRows; i++)
-            for (int j = 0; j < numUnitsWest; j++)
-                aRdEnNet.createPortInst(DCU_RD_EN + "[" + j + "]", westDcuInsts[i]);
+        aRdEnNet.createPortInst(DCU_RD_EN, westDcuInsts[0]);
+        for (int i = 0; i < nRows - 1; i++) {
+            EDIFNet rdEnChain = topCell.createNet("a_rd_en_chain_" + i + "_to_" + (i + 1));
+            rdEnChain.createPortInst(DCU_RD_EN_OUT, westDcuInsts[i]);
+            rdEnChain.createPortInst(DCU_RD_EN, westDcuInsts[i + 1]);
+        }
 
         // NorthDCU daisy chain (B matrix)
         connectDaisyChain(topCell, northDcuInsts,
