@@ -120,6 +120,7 @@ public class RapidSA {
         Design arrayDesign = ab.getArray();
 
         // Insert flop tree on the accum_shift net
+        arrayDesign.flattenDesign();
         EDIFTools.uniqueifyNetlist(arrayDesign);
         FlopTreeTools.insertFlopTreeForNet(arrayDesign, "sa_accum_shift", "clk", 4, 3);
 

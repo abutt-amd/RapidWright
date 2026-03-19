@@ -37,6 +37,7 @@ import com.xilinx.rapidwright.edif.EDIFHierCellInst;
 import com.xilinx.rapidwright.edif.EDIFHierNet;
 import com.xilinx.rapidwright.edif.EDIFHierPortInst;
 import com.xilinx.rapidwright.edif.EDIFNet;
+import com.xilinx.rapidwright.edif.EDIFNetlist;
 import com.xilinx.rapidwright.edif.EDIFTools;
 import com.xilinx.rapidwright.placer.blockplacer.Point;
 import com.xilinx.rapidwright.util.Pair;
@@ -103,14 +104,14 @@ public class FlopTreeTools {
         Map<EDIFHierNet, List<EDIFHierPortInst>> netToPortInsts = new HashMap<>();
         netToPortInsts.put(net.getLogicalHierNet(), portInsts);
         ECOTools.connectNet(design, netToPortInsts, null);
-        Net origPhysNet = design.getNet(origNet.getName());
+        Net origPhysNet = design.getNet(logicalNet.getHierarchicalNetName());
         if (origPhysNet == null) {
             if (origNet.isGND()) {
                 origPhysNet = design.getGndNet();
             } else if (origNet.isVCC()) {
                 origPhysNet = design.getVccNet();
             } else {
-                origPhysNet = design.createNet(new EDIFHierNet(design.getNetlist().getTopHierCellInst(), origNet));
+                origPhysNet = design.createNet(logicalNet);
             }
         }
         origPhysNet.connect(flop, "D");
@@ -232,7 +233,7 @@ public class FlopTreeTools {
             for (Pair<Net, List<EDIFHierPortInst>> pair : currPortInstList) {
                 Net net = pair.getFirst();
                 List<EDIFHierPortInst> portInsts = pair.getSecond();
-                String newNetName = netName + "_slr" + slr.getId() + "_d" + currDepth + "_" + i;
+                String newNetName = netName.replace(EDIFTools.EDIF_HIER_SEP, "_") + "_slr" + slr.getId() + "_d" + currDepth + "_" + i;
                 Pair<Site, Net> centroidNetPair = placeFlopNearCentroidOfPortInsts(design, clkName, net, newNetName,
                         portInsts, siteInstsToRoute);
 
@@ -299,8 +300,8 @@ public class FlopTreeTools {
         Site portInstCentroid = findCentroidOfPortInsts(design, portInsts);
 
         List<Point> points = new ArrayList<>();
-        points.add(new Point(portInstCentroid.getTile().getColumn(), portInstCentroid.getTile().getColumn()));
-        points.add(new Point(sourceSite.getTile().getColumn(), sourceSite.getTile().getColumn()));
+        points.add(new Point(portInstCentroid.getTile().getColumn(), portInstCentroid.getTile().getRow()));
+        points.add(new Point(sourceSite.getTile().getColumn(), sourceSite.getTile().getRow()));
 
         Site midPoint = ECOPlacementHelper.getCentroidOfPoints(design.getDevice(), points, VALID_CENTROID_SITE_TYPES);
 
@@ -308,8 +309,8 @@ public class FlopTreeTools {
         Pair<Site, BEL> loc = nextAvailFlopPlacement(design, siteItr, null);
 
         Pair<Cell, Net> netCellPair = createAndPlaceFlopForTree(design, net.getLogicalHierNet(),
-                net.getName() + "_ff0", loc,
-                design.getNet(clkName).getLogicalHierNet(), portInsts);
+                net.getName().replace(EDIFTools.EDIF_HIER_SEP, "_") + "_ff0", loc,
+                design.getNetlist().getHierNetFromName(clkName), portInsts);
 
         siteInstsToRoute.add(netCellPair.getFirst().getSiteInst());
 
@@ -319,7 +320,9 @@ public class FlopTreeTools {
 
     public static void insertFlopTreeForNet(Design design, String netName, String clkName, int depth,
                                             int maxDepthPerSLR) {
-        Net topNet = design.getNet(netName);
+        EDIFNetlist netlist = design.getNetlist();
+        EDIFHierNet parentNet = netlist.getParentNet(netlist.getHierNetFromName(netName));
+        Net topNet = design.getNet(parentNet.getHierarchicalNetName());
         List<EDIFHierPortInst> sinkHierPortInsts = topNet.getLogicalHierNet().getLeafHierPortInsts(false);
         Set<SiteInst> siteInstsToRoute = new HashSet<>();
 
