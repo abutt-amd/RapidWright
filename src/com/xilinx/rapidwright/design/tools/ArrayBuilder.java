@@ -810,7 +810,7 @@ public class ArrayBuilder {
                         } else {
                             // Choose proposed anchor to place instance
                             ModuleInst curr = array.createModuleInst(instToPlace, module);
-                            if (curr.place(anchor, true, false)) {
+                            if (curr.place(anchor, false, false)) {
                                 placed = true;
                                 boundingBoxes.add(newBoundingBox);
                                 newPlacementMap.put(curr, anchor);

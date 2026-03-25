@@ -9,7 +9,7 @@ module dcu_fifo_tile_north #(
     parameter ID_OFFSET = 0
 )(
     input logic clk,
-    input logic rst_n,
+    input logic reset,
 
     input logic [DATA_WIDTH-1:0] s_data,
     input logic [TAG_WIDTH-1:0]  s_tag,
@@ -33,32 +33,44 @@ module dcu_fifo_tile_north #(
         id_reg <= id_reg;
     end
 
-    // Chain wires into each DCU stage (after skid buffers)
+    // Chain wires between DCU stages (direct connection, no internal skid buffers)
     logic [DATA_WIDTH-1:0] chain_data  [NUM_UNITS:0];
     logic [TAG_WIDTH-1:0]  chain_tag   [NUM_UNITS:0];
     logic                  chain_valid [NUM_UNITS:0];
     logic                  chain_ready [NUM_UNITS:0];
-
-    // Raw wires out of each DCU stage (before skid buffers)
-    logic [DATA_WIDTH-1:0] raw_data  [NUM_UNITS-1:0];
-    logic [TAG_WIDTH-1:0]  raw_tag   [NUM_UNITS-1:0];
-    logic                  raw_valid [NUM_UNITS-1:0];
-    logic                  raw_ready [NUM_UNITS-1:0];
 
     logic [DATA_WIDTH-1:0] fifo_wdata [NUM_UNITS-1:0];
     logic                  fifo_wen   [NUM_UNITS-1:0];
     logic                  fifo_full  [NUM_UNITS-1:0];
     logic                  fifo_empty [NUM_UNITS-1:0];
 
-    assign chain_data[0]  = s_data;
-    assign chain_tag[0]   = s_tag;
-    assign chain_valid[0] = s_valid;
-    assign s_ready        = chain_ready[0];
+    // Skid buffer at tile input breaks the inter-tile timing path
+    skid_buffer #(
+        .WIDTH(DATA_WIDTH + TAG_WIDTH)
+    ) u_skid_in (
+        .clk(clk),
+        .rst_n(~reset),
+        .s_data({s_data, s_tag}),
+        .s_valid(s_valid),
+        .s_ready(s_ready),
+        .m_data({chain_data[0], chain_tag[0]}),
+        .m_valid(chain_valid[0]),
+        .m_ready(chain_ready[0])
+    );
 
-    assign m_data  = chain_data[NUM_UNITS];
-    assign m_tag   = chain_tag[NUM_UNITS];
-    assign m_valid = chain_valid[NUM_UNITS];
-    assign chain_ready[NUM_UNITS] = m_ready;
+    // Skid buffer at tile output breaks the inter-tile ready/valid/data path
+    skid_buffer #(
+        .WIDTH(DATA_WIDTH + TAG_WIDTH)
+    ) u_skid_out (
+        .clk(clk),
+        .rst_n(~reset),
+        .s_data({chain_data[NUM_UNITS], chain_tag[NUM_UNITS]}),
+        .s_valid(chain_valid[NUM_UNITS]),
+        .s_ready(chain_ready[NUM_UNITS]),
+        .m_data({m_data, m_tag}),
+        .m_valid(m_valid),
+        .m_ready(m_ready)
+    );
 
     genvar i;
     generate
@@ -69,47 +81,39 @@ module dcu_fifo_tile_north #(
                 .ID_WIDTH(ID_WIDTH)
             ) u_dcu (
                 .clk(clk),
-                .rst_n(rst_n),
+                .rst_n(~reset),
                 .id(id_reg + ID_WIDTH'(i)),
                 .s_data(chain_data[i]),
                 .s_tag(chain_tag[i]),
                 .s_valid(chain_valid[i]),
                 .s_ready(chain_ready[i]),
-                .m_data(raw_data[i]),
-                .m_tag(raw_tag[i]),
-                .m_valid(raw_valid[i]),
-                .m_ready(raw_ready[i]),
+                .m_data(chain_data[i+1]),
+                .m_tag(chain_tag[i+1]),
+                .m_valid(chain_valid[i+1]),
+                .m_ready(chain_ready[i+1]),
                 .fifo_wdata(fifo_wdata[i]),
                 .fifo_wen(fifo_wen[i]),
                 .fifo_full(fifo_full[i])
             );
 
             assign fifo_full[i] = fifo_full_internal[i];
-
-            // Skid buffer breaks the ready/valid combinational chain between stages
-            skid_buffer #(
-                .WIDTH(DATA_WIDTH + TAG_WIDTH)
-            ) u_skid (
-                .clk(clk),
-                .rst_n(rst_n),
-                .s_data({raw_data[i], raw_tag[i]}),
-                .s_valid(raw_valid[i]),
-                .s_ready(raw_ready[i]),
-                .m_data({chain_data[i+1], chain_tag[i+1]}),
-                .m_valid(chain_valid[i+1]),
-                .m_ready(chain_ready[i+1])
-            );
         end
     endgenerate
 
     // rd_en pipeline: input feeds unit 0, registered between each subsequent unit
+    // Register rd_en at tile input to break inter-tile timing path
     logic rd_en_pipe [NUM_UNITS:0];
-    assign rd_en_pipe[0] = rd_en;
+    always_ff @(posedge clk) begin
+        if (reset)
+            rd_en_pipe[0] <= 1'b0;
+        else
+            rd_en_pipe[0] <= rd_en;
+    end
 
     generate
         for (i = 0; i < NUM_UNITS; i = i + 1) begin : gen_rd_en_pipe
             always_ff @(posedge clk) begin
-                if (!rst_n)
+                if (reset)
                     rd_en_pipe[i+1] <= 1'b0;
                 else
                     rd_en_pipe[i+1] <= rd_en_pipe[i];
@@ -136,7 +140,7 @@ module dcu_fifo_tile_north #(
         .PTR_SIZE(FIFO_PTR_SIZE),
         .NUM_FIFOS(NUM_UNITS)
     ) u_fifo_tile (
-        .reset(~rst_n),
+        .reset(reset),
         .clk(clk),
         .wr_en(fifo_wen),
         .din(fifo_wdata),
@@ -150,7 +154,7 @@ module dcu_fifo_tile_north #(
     generate
         for (i = 0; i < NUM_UNITS; i = i + 1) begin : gen_dout_valid
             always_ff @(posedge clk) begin
-                if (!rst_n) begin
+                if (reset) begin
                     dout_valid[i] <= 1'b0;
                 end else begin
                     dout_valid[i] <= ~fifo_empty[i] && rd_en_arr[i];

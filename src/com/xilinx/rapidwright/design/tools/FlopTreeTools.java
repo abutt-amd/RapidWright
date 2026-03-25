@@ -210,9 +210,15 @@ public class FlopTreeTools {
                                                                     Set<SiteInst> siteInstsToRoute) {
         Site centroid = findCentroidOfPortInsts(design, portInsts);
 
+        if (centroid == null) {
+            throw new RuntimeException("Failed to find centroid of net " + inputNet);
+        }
+
         Iterator<Site> siteItr = ECOPlacementHelper.spiralOutFrom(centroid).iterator();
         Pair<Site, BEL> loc = nextAvailFlopPlacement(design, siteItr, null);
-        assert loc != null;
+        if (loc == null) {
+            throw new RuntimeException("Failed to find location to place flop in flop tree");
+        }
         Pair<Cell, Net> flopNetPair = createAndPlaceFlopForTree(design, inputNet.getLogicalHierNet(), newNetName, loc,
                 design.getNetlist().getHierNetFromName(clkName), portInsts);
         siteInstsToRoute.add(flopNetPair.getFirst().getSiteInst());
@@ -241,7 +247,9 @@ public class FlopTreeTools {
                 Net newNet = centroidNetPair.getSecond();
                 PortInstQuadrants quadrants = splitPortInstsIntoQuadrants(design, portInsts, centroid);
                 for (List<EDIFHierPortInst> quadrant : quadrants) {
-                    nextPortInstList.add(new Pair<>(newNet, quadrant));
+                    if (!quadrant.isEmpty()) {
+                        nextPortInstList.add(new Pair<>(newNet, quadrant));
+                    }
                 }
                 i++;
             }
@@ -299,23 +307,34 @@ public class FlopTreeTools {
         Site sourceSite = sourceCell.getSite();
         Site portInstCentroid = findCentroidOfPortInsts(design, portInsts);
 
-        List<Point> points = new ArrayList<>();
-        points.add(new Point(portInstCentroid.getTile().getColumn(), portInstCentroid.getTile().getRow()));
-        points.add(new Point(sourceSite.getTile().getColumn(), sourceSite.getTile().getRow()));
+        double srcCol = sourceSite.getTile().getColumn();
+        double srcRow = sourceSite.getTile().getRow();
+        double dstCol = portInstCentroid.getTile().getColumn();
+        double dstRow = portInstCentroid.getTile().getRow();
 
-        Site midPoint = ECOPlacementHelper.getCentroidOfPoints(design.getDevice(), points, VALID_CENTROID_SITE_TYPES);
+        Net currentNet = net;
+        for (int i = 0; i < depth; i++) {
+            // Place flop at evenly spaced point: (i+1)/(depth+1) of the way from source to destination
+            double frac = (double) (i + 1) / (depth + 1);
+            int col = (int) Math.round(srcCol + frac * (dstCol - srcCol));
+            int row = (int) Math.round(srcRow + frac * (dstRow - srcRow));
 
-        Iterator<Site> siteItr = ECOPlacementHelper.spiralOutFrom(midPoint).iterator();
-        Pair<Site, BEL> loc = nextAvailFlopPlacement(design, siteItr, null);
+            List<Point> points = new ArrayList<>();
+            points.add(new Point(col, row));
+            Site target = ECOPlacementHelper.getCentroidOfPoints(design.getDevice(), points, VALID_CENTROID_SITE_TYPES);
 
-        Pair<Cell, Net> netCellPair = createAndPlaceFlopForTree(design, net.getLogicalHierNet(),
-                net.getName().replace(EDIFTools.EDIF_HIER_SEP, "_") + "_ff0", loc,
-                design.getNetlist().getHierNetFromName(clkName), portInsts);
+            Iterator<Site> siteItr = ECOPlacementHelper.spiralOutFrom(target).iterator();
+            Pair<Site, BEL> loc = nextAvailFlopPlacement(design, siteItr, null);
 
-        siteInstsToRoute.add(netCellPair.getFirst().getSiteInst());
+            Pair<Cell, Net> netCellPair = createAndPlaceFlopForTree(design, currentNet.getLogicalHierNet(),
+                    currentNet.getName().replace(EDIFTools.EDIF_HIER_SEP, "_") + "_ff" + i, loc,
+                    design.getNetlist().getHierNetFromName(clkName), portInsts);
 
+            siteInstsToRoute.add(netCellPair.getFirst().getSiteInst());
+            currentNet = netCellPair.getSecond();
+        }
 
-        return netCellPair.getSecond();
+        return currentNet;
     }
 
     public static void insertFlopTreeForNet(Design design, String netName, String clkName, int depth,

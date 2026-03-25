@@ -31,6 +31,7 @@ import com.xilinx.rapidwright.edif.EDIFPort;
 import com.xilinx.rapidwright.edif.EDIFTools;
 import com.xilinx.rapidwright.rapidsa.components.NorthDCUTile;
 import com.xilinx.rapidwright.rapidsa.components.RapidComponent;
+import com.xilinx.rapidwright.rapidsa.components.SAControlFSM;
 import com.xilinx.rapidwright.rapidsa.components.WestDCUTile;
 import com.xilinx.rapidwright.util.FileTools;
 import com.xilinx.rapidwright.util.PerformanceExplorer;
@@ -71,8 +72,9 @@ public class RapidSAPrecompile {
             Arrays.asList(
 //                    new GEMMTile(4, 4),
                     new NorthDCUTile(4),
-                    new WestDCUTile(4)
-//                    new SAControlFSM()
+                    new WestDCUTile(4),
+//                    new DrainTile(4, 16),
+                    new SAControlFSM()
             )
     );
 

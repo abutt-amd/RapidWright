@@ -187,6 +187,10 @@ public class InlineFlopTools {
             Site shiftedSite = shiftSiteToSide(design.getDevice(), start, keepOut, side);
             for (int i : port.getBitBlastedIndices()) {
                 EDIFPortInst inst = port.getInternalPortInstFromIndex(i);
+                if (inst == null) {
+                    throw new RuntimeException("Port " + port + " is internally unconnected in design, either " +
+                            "fix the synthesized design for remove from the side map");
+                }
                 if (allLeavesAreIBUF(design, inst)) {
                     continue;
                 }
@@ -566,8 +570,8 @@ public class InlineFlopTools {
      * example_outputs.* BOTTOM
      * </pre>
      *
-     * @param netlist  The netlist that the side map will be created for.
-     * @param lines    The lines to be parsed into a map.
+     * @param netlist The netlist that the side map will be created for.
+     * @param lines   The lines to be parsed into a map.
      * @return A map from EDIFPort to the PBlockSide the inline flop should be placed on.
      */
     public static Map<EDIFPort, PBlockSide> parseSideMap(EDIFNetlist netlist, List<String> lines) {

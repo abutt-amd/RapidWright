@@ -42,6 +42,7 @@ import com.xilinx.rapidwright.edif.EDIFCell;
 import com.xilinx.rapidwright.edif.EDIFCellInst;
 import com.xilinx.rapidwright.edif.EDIFNetlist;
 import com.xilinx.rapidwright.edif.EDIFTools;
+import com.xilinx.rapidwright.rapidsa.components.DrainTile;
 import com.xilinx.rapidwright.rapidsa.components.GEMMTile;
 import com.xilinx.rapidwright.rapidsa.components.NorthDCUTile;
 import com.xilinx.rapidwright.rapidsa.components.RapidComponent;
@@ -54,11 +55,12 @@ import java.io.File;
 import java.util.ArrayList;
 import java.util.HashSet;
 import java.util.List;
-import java.util.Set;
 import java.util.Map;
+import java.util.Set;
 
 public class RapidSA {
     private static final int ID_WIDTH = 8;
+    private static final int DCU_UNITS_PER_TILE = 4;
 
     public static void main(String[] args) {
         String partName = "xcv80-lsva4737-2MHP-e-S";
@@ -117,12 +119,25 @@ public class RapidSA {
         Module fsmModule = loadRelocatableModule("RapidSA", new SAControlFSM(), ab.getArray());
         placeFSM(ab, fsmModule);
 
+        // Place DrainTiles below the array
+        int accumCount = 4 * 4; // nCols * nRows for GEMM tile accumulator count
+        Module drainModule = loadRelocatableModule("RapidSA", new DrainTile(accumCount, 8), ab.getArray());
+        placeDrainTiles(ab, 8, drainModule, accumCount);
+
         Design arrayDesign = ab.getArray();
 
-        // Insert flop tree on the accum_shift net
         arrayDesign.flattenDesign();
         EDIFTools.uniqueifyNetlist(arrayDesign);
-        FlopTreeTools.insertFlopTreeForNet(arrayDesign, "sa_accum_shift", "clk", 4, 3);
+        int flopTreeDepth = 6;
+        FlopTreeTools.insertFlopTreeForNet(arrayDesign, "sa_accum_shift", "clk", flopTreeDepth, 3);
+        FlopTreeTools.insertFlopTreeForNet(arrayDesign, "output_wr_en", "clk", flopTreeDepth, 3);
+
+        // Update FSM registers
+        SAControlFSM.setSAWidth(arrayDesign, "sa_fsm", 8);
+        SAControlFSM.setSAHeight(arrayDesign, "sa_fsm", 8);
+        SAControlFSM.setKDim(arrayDesign, "sa_fsm", 8);
+        SAControlFSM.setAccumShiftPipelineLatency(arrayDesign, "sa_fsm", flopTreeDepth);
+        SAControlFSM.setOutputWrPipelineLatency(arrayDesign, "sa_fsm", flopTreeDepth);
 
         // Add clock constraint
         arrayDesign.addXDCConstraint("create_clock -period 2.0 -name clk [get_ports clk]");
@@ -230,18 +245,102 @@ public class RapidSA {
                 throw new RuntimeException("Could not find valid placement for " + instName);
             }
 
-            if (!mi.place(bestAnchor, true, false)) {
+            if (!mi.place(bestAnchor, false, false)) {
                 throw new RuntimeException("Failed to place " + instName + " at " + bestAnchor);
             }
 
             placedBoundingBoxes.add(moduleBoundingBox
                     .getCorresponding(bestAnchor.getTile(), dcuModule.getAnchor().getTile()));
 
-            // Set id_reg init value to column index
-            RegisterInitTools.setRegisterValue(arrayDesign, instName + "/id_reg_reg", col, ID_WIDTH);
+            // Set id_reg init value so unit IDs don't overlap across tiles
+            int idValue = col * DCU_UNITS_PER_TILE;
+            RegisterInitTools.setRegisterValue(arrayDesign, instName + "/id_reg_reg", idValue, ID_WIDTH);
 
             System.out.println("  ** PLACED NorthDCU: " + instName + " at " + bestAnchor
-                    + " (id_reg=" + col + ")");
+                    + " (id_reg=" + idValue + ")");
+        }
+    }
+
+    /**
+     * Places DrainTile module instances physically below the array,
+     * aligned with each column's bottom-row centroid.
+     */
+    private static void placeDrainTiles(ArrayBuilder ab, int nCols, Module drainModule, int accumCount) {
+        Design arrayDesign = ab.getArray();
+        Map<Pair<Integer, Integer>, Site> centroidMap = ab.getLogicalToCentroidMap();
+
+        RelocatableTileRectangle moduleBoundingBox = drainModule.getBoundingBox();
+        List<RelocatableTileRectangle> placedBoundingBoxes = new ArrayList<>();
+
+        // Compute the array's bottom row from all placed sites
+        int arrayBottomRow = Integer.MIN_VALUE;
+        for (SiteInst si : arrayDesign.getSiteInsts()) {
+            arrayBottomRow = Math.max(arrayBottomRow, si.getTile().getRow());
+        }
+
+        // Find the number of rows from the centroid map
+        int nRows = 0;
+        for (Pair<Integer, Integer> key : centroidMap.keySet()) {
+            nRows = Math.max(nRows, key.getSecond() + 1);
+        }
+
+        for (int col = 0; col < nCols; col++) {
+            Site targetCentroid = centroidMap.get(new Pair<>(col, nRows - 1));
+            String instName = "drain_x" + col;
+
+            ModuleInst mi = arrayDesign.createModuleInst(instName, drainModule);
+
+            Site bestAnchor = null;
+            int bestDist = Integer.MAX_VALUE;
+
+            for (Site anchor : drainModule.getAllValidPlacements()) {
+                RelocatableTileRectangle candidateBB = moduleBoundingBox
+                        .getCorresponding(anchor.getTile(), drainModule.getAnchor().getTile());
+
+                // Top of drain bounding box must be below bottom of array
+                if (candidateBB.getMinRow() <= arrayBottomRow) {
+                    continue;
+                }
+
+                // Check no overlap with any placed bounding box
+                boolean overlaps = false;
+                for (RelocatableTileRectangle existing : placedBoundingBoxes) {
+                    if (existing.overlaps(candidateBB)) {
+                        overlaps = true;
+                        break;
+                    }
+                }
+                if (overlaps) continue;
+
+                int dist = Math.abs(anchor.getTile().getColumn() - targetCentroid.getTile().getColumn())
+                         + Math.abs(anchor.getTile().getRow() - targetCentroid.getTile().getRow());
+                if (dist < bestDist) {
+                    bestDist = dist;
+                    bestAnchor = anchor;
+                }
+            }
+
+            if (bestAnchor == null) {
+                throw new RuntimeException("Could not find valid placement for " + instName);
+            }
+
+            if (!mi.place(bestAnchor, false, false)) {
+                throw new RuntimeException("Failed to place " + instName + " at " + bestAnchor);
+            }
+
+            placedBoundingBoxes.add(moduleBoundingBox
+                    .getCorresponding(bestAnchor.getTile(), drainModule.getAnchor().getTile()));
+
+            // Set column element count (number of accumulators from this column's GEMM tiles)
+            DrainTile.setColumnElements(arrayDesign, instName, accumCount, 8);
+
+            // Set external upstream element count (accumulator elements from upstream drain tiles)
+            // drain_x0 is the output end, drain_x{nCols-1} has no upstream
+            int upstreamElements = (nCols - 1 - col) * accumCount;
+            DrainTile.setExternalUpstreamElements(arrayDesign, instName, upstreamElements, 8);
+
+            System.out.println("  ** PLACED DrainTile: " + instName + " at " + bestAnchor
+                    + " (col_elem=" + accumCount + ", ext_ups=" + upstreamElements + ")");
         }
     }
 
@@ -302,62 +401,101 @@ public class RapidSA {
                 throw new RuntimeException("Could not find valid placement for " + instName);
             }
 
-            if (!mi.place(bestAnchor, true, false)) {
+            if (!mi.place(bestAnchor, false, false)) {
                 throw new RuntimeException("Failed to place " + instName + " at " + bestAnchor);
             }
 
             placedBoundingBoxes.add(moduleBoundingBox
                     .getCorresponding(bestAnchor.getTile(), dcuModule.getAnchor().getTile()));
 
-            // Set id_reg init value to row index
-            RegisterInitTools.setRegisterValue(arrayDesign, instName + "/id_reg_reg", row, ID_WIDTH);
+            // Set id_reg init value so unit IDs don't overlap across tiles
+            int idValue = row * DCU_UNITS_PER_TILE;
+            RegisterInitTools.setRegisterValue(arrayDesign, instName + "/id_reg_reg", idValue, ID_WIDTH);
 
             System.out.println("  ** PLACED WestDCU: " + instName + " at " + bestAnchor
-                    + " (id_reg=" + row + ")");
+                    + " (id_reg=" + idValue + ")");
         }
     }
 
     /**
      * Places the SA FSM module instance near the top-left of the design,
-     * avoiding overlap with all existing placed sites.
+     * avoiding bounding box overlap with all existing placed module instances.
      */
     private static void placeFSM(ArrayBuilder ab, Module fsmModule) {
         Design arrayDesign = ab.getArray();
+        Map<Pair<Integer, Integer>, Site> centroidMap = ab.getLogicalToCentroidMap();
 
         RelocatableTileRectangle moduleBoundingBox = fsmModule.getBoundingBox();
 
-        // Build a set of all occupied tiles from placed SiteInsts
+        // Collect bounding boxes from all already-placed ModuleInsts
+        List<RelocatableTileRectangle> existingBoundingBoxes = new ArrayList<>();
+        for (ModuleInst existingMi : arrayDesign.getModuleInsts()) {
+            if (existingMi.isPlaced()) {
+                Module mod = existingMi.getModule();
+                existingBoundingBoxes.add(mod.getBoundingBox()
+                        .getCorresponding(existingMi.getPlacement().getTile(), mod.getAnchor().getTile()));
+            }
+        }
+
+        // Use the GEMM array's top-left centroid (col 0, row 0) as placement target
+        Site topLeftCentroid = centroidMap.get(new Pair<>(0, 0));
+        int targetRow = topLeftCentroid.getTile().getRow();
+        int targetCol = topLeftCentroid.getTile().getColumn();
+
+        // Build set of occupied tiles
         Set<Tile> occupiedTiles = new HashSet<>();
-        int topLeftRow = Integer.MAX_VALUE;
-        int topLeftCol = Integer.MAX_VALUE;
         for (SiteInst si : arrayDesign.getSiteInsts()) {
-            Tile t = si.getTile();
-            occupiedTiles.add(t);
-            topLeftRow = Math.min(topLeftRow, t.getRow());
-            topLeftCol = Math.min(topLeftCol, t.getColumn());
+            occupiedTiles.add(si.getTile());
+        }
+
+        // Debug: print FSM module info and valid anchors above the array
+        System.out.println("  FSM anchor site: " + fsmModule.getAnchor());
+        System.out.println("  FSM bounding box: " + moduleBoundingBox);
+        System.out.println("  FSM site types used:");
+        for (SiteInst si : fsmModule.getSiteInsts()) {
+            System.out.println("    " + si.getName() + " -> " + si.getSiteTypeEnum() + " @ " + si.getSite());
+        }
+        int arrayTopRow = targetRow;
+        System.out.println("  Total valid placements: " + fsmModule.getAllValidPlacements().size());
+        System.out.println("  Valid FSM anchors above array (row < " + arrayTopRow + "):");
+        for (Site anchor : fsmModule.getAllValidPlacements()) {
+            if (anchor.getTile().getRow() < arrayTopRow) {
+                System.out.println("    " + anchor + " (row=" + anchor.getTile().getRow() + ", col=" + anchor.getTile().getColumn() + ")");
+            }
         }
 
         ModuleInst mi = arrayDesign.createModuleInst("sa_fsm", fsmModule);
 
-        // Find the valid placement closest to the top-left corner
-        // where none of the FSM's SiteInsts would land on an occupied tile
         Site bestAnchor = null;
         int bestDist = Integer.MAX_VALUE;
 
         for (Site anchor : fsmModule.getAllValidPlacements()) {
-            // Check if any of the module's sites would collide with occupied tiles
-            boolean conflicts = false;
-            for (SiteInst modSi : fsmModule.getSiteInsts()) {
-                Site newSite = fsmModule.getCorrespondingSite(modSi, anchor);
-                if (newSite != null && occupiedTiles.contains(newSite.getTile())) {
-                    conflicts = true;
+            RelocatableTileRectangle candidateBB = moduleBoundingBox
+                    .getCorresponding(anchor.getTile(), fsmModule.getAnchor().getTile());
+
+            // Check bounding box overlap with existing ModuleInsts
+            boolean overlaps = false;
+            for (RelocatableTileRectangle existing : existingBoundingBoxes) {
+                if (existing.overlaps(candidateBB)) {
+                    overlaps = true;
                     break;
                 }
             }
-            if (conflicts) continue;
+            if (overlaps) continue;
 
-            int dist = Math.abs(anchor.getTile().getColumn() - topLeftCol)
-                     + Math.abs(anchor.getTile().getRow() - topLeftRow);
+            // Check site-level conflicts with occupied tiles (e.g. GEMM tiles)
+            boolean siteConflict = false;
+            for (SiteInst modSi : fsmModule.getSiteInsts()) {
+                Site newSite = fsmModule.getCorrespondingSite(modSi, anchor);
+                if (newSite != null && occupiedTiles.contains(newSite.getTile())) {
+                    siteConflict = true;
+                    break;
+                }
+            }
+            if (siteConflict) continue;
+
+            int dist = Math.abs(anchor.getTile().getColumn() - targetCol)
+                     + Math.abs(anchor.getTile().getRow() - targetRow);
             if (dist < bestDist) {
                 bestDist = dist;
                 bestAnchor = anchor;
@@ -368,7 +506,7 @@ public class RapidSA {
             throw new RuntimeException("Could not find valid placement for sa_fsm");
         }
 
-        if (!mi.place(bestAnchor, true, false)) {
+        if (!mi.place(bestAnchor, false, false)) {
             throw new RuntimeException("Failed to place sa_fsm at " + bestAnchor);
         }
 

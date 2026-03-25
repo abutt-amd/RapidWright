@@ -32,6 +32,7 @@ import com.xilinx.rapidwright.edif.EDIFNet;
 import com.xilinx.rapidwright.edif.EDIFNetlist;
 import com.xilinx.rapidwright.edif.EDIFPort;
 import com.xilinx.rapidwright.edif.EDIFTools;
+import com.xilinx.rapidwright.rapidsa.components.DrainTile;
 import com.xilinx.rapidwright.rapidsa.components.GEMMTile;
 import com.xilinx.rapidwright.rapidsa.components.NorthDCUTile;
 import com.xilinx.rapidwright.rapidsa.components.RapidComponent;
@@ -86,6 +87,16 @@ public class RapidSANetlistBuilder {
     private static final String DCU_RD_EN_OUT  = "rd_en_out";
     private static final String DCU_DOUT       = "dout";
     private static final String DCU_DOUT_VALID = "dout_valid";
+
+    // Drain tile ports
+    private static final String DRAIN_FIFO_WR_EN = "fifo_wr_en";
+    private static final String DRAIN_FIFO_DIN   = "fifo_din";
+    private static final String DRAIN_M_TDATA    = "m_axis_downstream_tdata";
+    private static final String DRAIN_M_TVALID   = "m_axis_downstream_tvalid";
+    private static final String DRAIN_M_TREADY   = "m_axis_downstream_tready";
+    private static final String DRAIN_S_TDATA    = "s_axis_upstream_tdata";
+    private static final String DRAIN_S_TVALID   = "s_axis_upstream_tvalid";
+    private static final String DRAIN_S_TREADY   = "s_axis_upstream_tready";
 
     // FSM ports
     private static final String FSM_START          = "start";
@@ -159,6 +170,14 @@ public class RapidSANetlistBuilder {
         int southCount = countArrayPorts(gemmCell, GEMM_SOUTH_OUTPUTS);
         int accumCount = countArrayPorts(gemmCell, GEMM_ACCUM_INPUTS);
 
+        // Create DrainTile component (needs accumCount from GEMM cell)
+        RapidComponent drainComponent = new DrainTile(accumCount, 8);
+        EDIFCell drainCell = loadComponentCell(precompileDir, drainComponent);
+        String drainClk = drainComponent.getClkName();
+        String drainRst = drainComponent.getResetName();
+        netlist.migrateCellAndSubCells(drainCell, true);
+        drainCell.makePrimitive();
+
         int dcuDoutWidth = getPortWidth(northDcuCell, DCU_DOUT + "[0]");
         if (dcuDoutWidth != dataBits) {
             throw new RuntimeException(
@@ -181,12 +200,15 @@ public class RapidSANetlistBuilder {
 
         EDIFCellInst fsmInst = createBlackBox(topCell, "sa_fsm", fsmCell);
 
+        EDIFCellInst[] drainInsts = new EDIFCellInst[nCols];
+        for (int i = 0; i < nCols; i++)
+            drainInsts[i] = createBlackBox(topCell, "drain_x" + i, drainCell);
+
         // Top-level ports
         EDIFPort topClk = topCell.createPort("clk", EDIFDirection.INPUT, 1);
         EDIFPort topRstN = topCell.createPort("rst_n", EDIFDirection.INPUT, 1);
         EDIFPort topStart = topCell.createPort("start", EDIFDirection.INPUT, 1);
         EDIFPort topDone = topCell.createPort("done", EDIFDirection.OUTPUT, 1);
-        EDIFPort topOutputWrEn = topCell.createPort("output_wr_en", EDIFDirection.OUTPUT, 1);
 
         EDIFPort topBSData = createBusPort(topCell, "b_s_data", EDIFDirection.INPUT, dataWidth);
         EDIFPort topBSTag = createBusPort(topCell, "b_s_tag", EDIFDirection.INPUT, tagWidth);
@@ -217,6 +239,8 @@ public class RapidSANetlistBuilder {
             clkNet.createPortInst(northDcuClk, northDcuInsts[i]);
         for (int i = 0; i < nRows; i++)
             clkNet.createPortInst(westDcuClk, westDcuInsts[i]);
+        for (int i = 0; i < nCols; i++)
+            clkNet.createPortInst(drainClk, drainInsts[i]);
 
         // rst_n: fans out to all DCU instances
         EDIFNet rstNNet = topCell.createNet("rst_n");
@@ -229,11 +253,23 @@ public class RapidSANetlistBuilder {
             for (int i = 0; i < nRows; i++)
                 rstNNet.createPortInst(westDcuRst, westDcuInsts[i]);
         }
+        if (drainRst != null) {
+            for (int i = 0; i < nCols; i++)
+                rstNNet.createPortInst(drainRst, drainInsts[i]);
+        }
 
         // FSM control connections
         connectSingleBit(topCell, "start", topStart, fsmInst, FSM_START);
         connectSingleBit(topCell, "done", topDone, fsmInst, FSM_DONE);
-        connectSingleBit(topCell, "output_wr_en", topOutputWrEn, fsmInst, FSM_OUTPUT_WR_EN);
+
+        // FSM output_wr_en -> all drain tiles' fifo_wr_en (all bits)
+        EDIFNet outputWrEnNet = topCell.createNet("output_wr_en");
+        outputWrEnNet.createPortInst(FSM_OUTPUT_WR_EN, fsmInst);
+        for (int col = 0; col < nCols; col++) {
+            for (int k = 0; k < accumCount; k++) {
+                outputWrEnNet.createPortInst(DRAIN_FIFO_WR_EN + "[" + k + "]", drainInsts[col]);
+            }
+        }
 
         if (fsmRst != null) {
             EDIFPort topReset = topCell.createPort("reset", EDIFDirection.INPUT, 1);
@@ -357,13 +393,38 @@ public class RapidSANetlistBuilder {
                             accumBits);
                 }
 
-                EDIFPort accumOutPort = createBusPort(topCell,
-                        "accum_outputs_col" + col + "[" + k + "]", EDIFDirection.OUTPUT, accumBits);
-                connectBusPortToTopLevel(topCell, "accum_out_x" + col + "_k" + k,
-                        accumOutPort, gemmInsts[nRows - 1][col],
-                        GEMM_ACCUM_OUTPUTS + "[" + k + "]", accumBits);
+                // Bottom GEMM tile accum_outputs -> drain tile fifo_din
+                connectBusPorts(topCell, "accum_to_drain_x" + col + "_k" + k,
+                        gemmInsts[nRows - 1][col], GEMM_ACCUM_OUTPUTS + "[" + k + "]",
+                        drainInsts[col], DRAIN_FIFO_DIN + "[" + k + "]",
+                        accumBits);
             }
         }
+
+        // Drain tile AXI-stream chain (drain_x[i+1].m_downstream -> drain_x[i].s_upstream)
+        for (int i = 0; i < nCols - 1; i++) {
+            connectBusPorts(topCell, "drain_chain_data_" + (i + 1) + "_to_" + i,
+                    drainInsts[i + 1], DRAIN_M_TDATA,
+                    drainInsts[i], DRAIN_S_TDATA, accumBits);
+            connectSingleBit(topCell, "drain_chain_valid_" + (i + 1) + "_to_" + i,
+                    drainInsts[i + 1], DRAIN_M_TVALID, drainInsts[i], DRAIN_S_TVALID);
+            connectSingleBit(topCell, "drain_chain_ready_" + (i + 1) + "_to_" + i,
+                    drainInsts[i], DRAIN_S_TREADY, drainInsts[i + 1], DRAIN_M_TREADY);
+        }
+
+        // Top-level drain output ports (drain_x0's downstream)
+        EDIFPort topDrainTdata = createBusPort(topCell, "drain_tdata", EDIFDirection.OUTPUT, accumBits);
+        EDIFPort topDrainTvalid = topCell.createPort("drain_tvalid", EDIFDirection.OUTPUT, 1);
+        EDIFPort topDrainTready = topCell.createPort("drain_tready", EDIFDirection.INPUT, 1);
+        connectBusPortToTopLevel(topCell, "drain_out_tdata", topDrainTdata, drainInsts[0], DRAIN_M_TDATA, accumBits);
+        connectSingleBit(topCell, "drain_out_tvalid", topDrainTvalid, drainInsts[0], DRAIN_M_TVALID);
+        connectSingleBit(topCell, "drain_out_tready", topDrainTready, drainInsts[0], DRAIN_M_TREADY);
+
+        // Tie rightmost drain tile's upstream inputs to GND (no external upstream)
+        for (int i = 0; i < accumBits; i++) {
+            gndNet.createPortInst(DRAIN_S_TDATA + "[" + i + "]", drainInsts[nCols - 1]);
+        }
+        gndNet.createPortInst(DRAIN_S_TVALID, drainInsts[nCols - 1]);
 
         // Right-edge east outputs -> top-level
         for (int r = 0; r < nRows; r++) {

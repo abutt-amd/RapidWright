@@ -1,6 +1,6 @@
 /*
  *
- * Copyright (c) 2025, Advanced Micro Devices, Inc.
+ * Copyright (c) 2026, Advanced Micro Devices, Inc.
  * All rights reserved.
  *
  * Author: Andrew Butt, AMD Advanced Research and Development.
@@ -38,28 +38,29 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 
-public class NorthDCUTile implements RapidComponent {
-    final private int width;
-    private static final int ID_WIDTH = 8;
-    private static final String ID_REG_BASE_NAME = "id_reg_reg";
+public class DrainTile implements RapidComponent {
+    private final int numL2Units;
+    private final int elemRegWidth;
 
-    public NorthDCUTile(int width) {
-        this.width = width;
+    private static final String COL_ELEM_REG_BASE_NAME = "col_elem_reg_reg";
+    private static final String EXT_UPS_ELEM_REG_BASE_NAME = "ext_ups_elem_reg_reg";
+
+    public DrainTile(int numL2Units, int elemRegWidth) {
+        this.numL2Units = numL2Units;
+        this.elemRegWidth = elemRegWidth;
     }
 
-    /**
-     * Updates the id_reg initialization value in a placed-and-routed design.
-     *
-     * @param design The pnr Design containing the id_reg flip-flops
-     * @param idValue The new ID value to initialize the register with
-     */
-    public static void setIdRegValue(Design design, int idValue) {
-        RegisterInitTools.setRegisterValue(design, ID_REG_BASE_NAME, idValue, ID_WIDTH);
+    public static void setColumnElements(Design design, String instPrefix, int value, int regWidth) {
+        RegisterInitTools.setRegisterValue(design, instPrefix + "/" + COL_ELEM_REG_BASE_NAME, value, regWidth);
+    }
+
+    public static void setExternalUpstreamElements(Design design, String instPrefix, int value, int regWidth) {
+        RegisterInitTools.setRegisterValue(design, instPrefix + "/" + EXT_UPS_ELEM_REG_BASE_NAME, value, regWidth);
     }
 
     @Override
     public String getComponentName() {
-        return "NorthDCUTile";
+        return "DrainTile";
     }
 
     @Override
@@ -67,24 +68,24 @@ public class NorthDCUTile implements RapidComponent {
         String rapidWrightPath = FileTools.getRapidWrightPath();
         String rapidSAVerilogPath = rapidWrightPath + File.separator + "rapidsa-rtl" +
                 File.separator + "os-sources" + File.separator;
-        List<String> files = new java.util.ArrayList<>();
+        List<String> files = new ArrayList<>();
         files.add(rapidSAVerilogPath + "fifo.sv");
-        files.add(rapidSAVerilogPath + "fifo_tile.sv");
         files.add(rapidSAVerilogPath + "skid_buffer.sv");
-        files.add(rapidSAVerilogPath + "daisy_chain_loader.sv");
-        files.add(rapidSAVerilogPath + "dcu_fifo_tile_north.sv");
+        files.add(rapidSAVerilogPath + "drain_l2_module.sv");
+        files.add(rapidSAVerilogPath + "drain_l2_tile.sv");
         return files;
     }
 
     @Override
     public String getTopVerilogName() {
-        return "dcu_fifo_tile_north";
+        return "drain_l2_tile";
     }
 
     @Override
     public Map<String, String> getParameterMap() {
         Map<String, String> parameterMap = new HashMap<>();
-        parameterMap.put("NUM_UNITS", String.valueOf(width));
+        parameterMap.put("NUM_L2_UNITS", String.valueOf(numL2Units));
+        parameterMap.put("ELEM_REG_WIDTH", String.valueOf(elemRegWidth));
         return parameterMap;
     }
 
@@ -109,12 +110,11 @@ public class NorthDCUTile implements RapidComponent {
     @Override
     public Map<EDIFPort, PBlockSide> getSideMap(Design d) {
         List<String> lines = new ArrayList<>();
-        lines.add("s_.* LEFT");
-        lines.add("reset LEFT");
-        lines.add("m_.* RIGHT");
-        lines.add("rd_en LEFT");
-        lines.add("dout.* BOTTOM");
-        Map<EDIFPort, PBlockSide> map = InlineFlopTools.parseSideMap(d.getNetlist(), lines);
-        return map;
+        lines.add("fifo_wr_en.* TOP");
+        lines.add("fifo_din.* TOP");
+        lines.add("reset TOP");
+        lines.add("m_axis_downstream.* LEFT");
+        lines.add("s_axis_upstream.* RIGHT");
+        return InlineFlopTools.parseSideMap(d.getNetlist(), lines);
     }
 }

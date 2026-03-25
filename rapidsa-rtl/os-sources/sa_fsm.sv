@@ -40,11 +40,11 @@ module sa_fsm #(
     (* dont_touch = "true" *) logic [LATENCY_REG_WIDTH-1:0] output_wr_pipeline_latency = OUTPUT_WR_PIPELINE_LATENCY;
     (* dont_touch = "true" *) logic [LATENCY_REG_WIDTH-1:0] pe_pipeline_latency = PE_PIPELINE_LATENCY;
 
-    // Pre-computed comparison targets
-    (* dont_touch = "true" *) logic [SIZE_REG_WIDTH-1:0] shift_out_target = SA_HEIGHT - 1;
-    (* dont_touch = "true" *) logic [SIZE_REG_WIDTH-1:0] running_wait_target = SA_HEIGHT + SA_WIDTH + PE_PIPELINE_LATENCY - 3;
-    (* dont_touch = "true" *) logic [SIZE_REG_WIDTH-1:0] drain_exit_target = SA_HEIGHT + ACCUM_SHIFT_PIPELINE_LATENCY + 1;
-    (* dont_touch = "true" *) logic [SIZE_REG_WIDTH-1:0] output_wr_start_target = ACCUM_SHIFT_PIPELINE_LATENCY + 1;
+    // Pre-computed comparison targets (derived from configurable registers)
+    logic [SIZE_REG_WIDTH-1:0] shift_out_target;
+    logic [SIZE_REG_WIDTH-1:0] running_wait_target;
+    logic [SIZE_REG_WIDTH-1:0] drain_exit_target;
+    logic [SIZE_REG_WIDTH-1:0] output_wr_start_target;
 
     always_ff @(posedge clk) begin
         sa_width <= sa_width;
@@ -53,10 +53,10 @@ module sa_fsm #(
         accum_shift_pipeline_latency <= accum_shift_pipeline_latency;
         output_wr_pipeline_latency <= output_wr_pipeline_latency;
         pe_pipeline_latency <= pe_pipeline_latency;
-        shift_out_target <= shift_out_target;
-        running_wait_target <= running_wait_target;
-        drain_exit_target <= drain_exit_target;
-        output_wr_start_target <= output_wr_start_target;
+        shift_out_target <= sa_height - 1;
+        running_wait_target <= sa_height + sa_width + pe_pipeline_latency - 3;
+        drain_exit_target <= sa_height + accum_shift_pipeline_latency + 1;
+        output_wr_start_target <= accum_shift_pipeline_latency + 1;
     end
 
     // State registers

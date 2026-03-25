@@ -18,21 +18,17 @@ module skid_buffer #(
     logic [WIDTH-1:0] buf_data;
     logic             buf_valid;
 
-    // s_ready is purely registered — breaks the ready path
+    // All outputs are purely registered — no combinational pass-through
     assign s_ready = !buf_valid;
-
-    assign m_data  = buf_valid ? buf_data : s_data;
-    assign m_valid = buf_valid || s_valid;
+    assign m_data  = buf_data;
+    assign m_valid = buf_valid;
 
     always_ff @(posedge clk) begin
         if (!rst_n) begin
             buf_valid <= 1'b0;
-        end else if (s_valid && s_ready && !m_ready) begin
-            // Downstream stalled: capture into skid register
+        end else if (!buf_valid || m_ready) begin
             buf_data  <= s_data;
-            buf_valid <= 1'b1;
-        end else if (m_ready) begin
-            buf_valid <= 1'b0;
+            buf_valid <= s_valid;
         end
     end
 

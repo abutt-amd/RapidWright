@@ -95,7 +95,7 @@ public class WestDCUTile implements RapidComponent {
 
     @Override
     public String getResetName() {
-        return "rst_n";
+        return "reset";
     }
 
     @Override
@@ -109,7 +109,7 @@ public class WestDCUTile implements RapidComponent {
     public Map<EDIFPort, PBlockSide> getSideMap(Design d) {
         List<String> lines = new ArrayList<>();
         lines.add("s_.* TOP");
-        lines.add("rst_n TOP");
+        lines.add("reset TOP");
         lines.add("m_.* BOTTOM");
         lines.add("rd_en TOP");
         lines.add("dout.* RIGHT");

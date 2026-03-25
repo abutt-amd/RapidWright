@@ -27,6 +27,7 @@ import com.xilinx.rapidwright.design.Design;
 import com.xilinx.rapidwright.design.blocks.PBlock;
 import com.xilinx.rapidwright.design.blocks.PBlockSide;
 import com.xilinx.rapidwright.design.tools.InlineFlopTools;
+import com.xilinx.rapidwright.design.tools.RegisterInitTools;
 import com.xilinx.rapidwright.device.Device;
 import com.xilinx.rapidwright.edif.EDIFPort;
 import com.xilinx.rapidwright.util.FileTools;
@@ -38,6 +39,31 @@ import java.util.List;
 import java.util.Map;
 
 public class SAControlFSM implements RapidComponent {
+
+    private static final int SIZE_REG_WIDTH = 32;
+    private static final int LATENCY_REG_WIDTH = 4;
+
+    public static void setSAWidth(Design design, String instPrefix, int width) {
+        RegisterInitTools.setRegisterValue(design, instPrefix + "/sa_width_reg", width, SIZE_REG_WIDTH);
+    }
+
+    public static void setSAHeight(Design design, String instPrefix, int height) {
+        RegisterInitTools.setRegisterValue(design, instPrefix + "/sa_height_reg", height, SIZE_REG_WIDTH);
+    }
+
+    public static void setKDim(Design design, String instPrefix, int kDim) {
+        RegisterInitTools.setRegisterValue(design, instPrefix + "/k_dim_reg", kDim, SIZE_REG_WIDTH);
+    }
+
+    public static void setAccumShiftPipelineLatency(Design design, String instPrefix, int latency) {
+        RegisterInitTools.setRegisterValue(design, instPrefix + "/accum_shift_pipeline_latency_reg", latency, LATENCY_REG_WIDTH);
+    }
+
+    public static void setOutputWrPipelineLatency(Design design, String instPrefix, int latency) {
+        RegisterInitTools.setRegisterValue(design, instPrefix + "/output_wr_pipeline_latency_reg", latency, LATENCY_REG_WIDTH);
+    }
+
+
     @Override
     public String getComponentName() {
         return "SAControlFSM";
