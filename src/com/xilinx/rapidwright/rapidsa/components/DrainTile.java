@@ -34,7 +34,6 @@ import com.xilinx.rapidwright.util.FileTools;
 
 import java.io.File;
 import java.util.ArrayList;
-import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 
@@ -64,29 +63,18 @@ public class DrainTile implements RapidComponent {
     }
 
     @Override
-    public List<String> getVerilogFiles() {
-        String rapidWrightPath = FileTools.getRapidWrightPath();
-        String rapidSAVerilogPath = rapidWrightPath + File.separator + "rapidsa-rtl" +
-                File.separator + "os-sources" + File.separator;
-        List<String> files = new ArrayList<>();
-        files.add(rapidSAVerilogPath + "fifo.sv");
-        files.add(rapidSAVerilogPath + "skid_buffer.sv");
-        files.add(rapidSAVerilogPath + "drain_l2_module.sv");
-        files.add(rapidSAVerilogPath + "drain_l2_tile.sv");
-        return files;
-    }
-
-    @Override
-    public String getTopVerilogName() {
-        return "drain_l2_tile";
-    }
-
-    @Override
-    public Map<String, String> getParameterMap() {
-        Map<String, String> parameterMap = new HashMap<>();
-        parameterMap.put("NUM_L2_UNITS", String.valueOf(numL2Units));
-        parameterMap.put("ELEM_REG_WIDTH", String.valueOf(elemRegWidth));
-        return parameterMap;
+    public List<String> getDesignTclLines() {
+        String rtlPath = FileTools.getRapidWrightPath() + File.separator + "rapidsa-rtl"
+                + File.separator + "os-sources" + File.separator;
+        List<String> lines = new ArrayList<>();
+        lines.add("read_verilog -sv " + rtlPath + "fifo.sv");
+        lines.add("read_verilog -sv " + rtlPath + "skid_buffer.sv");
+        lines.add("read_verilog -sv " + rtlPath + "drain_l2_module.sv");
+        lines.add("read_verilog -sv " + rtlPath + "drain_l2_tile.sv");
+        lines.add("set_property generic {NUM_L2_UNITS=" + numL2Units
+                + " ELEM_REG_WIDTH=" + elemRegWidth + " } [current_fileset]");
+        lines.add("set_property top drain_l2_tile [current_fileset]");
+        return lines;
     }
 
     @Override
@@ -113,8 +101,8 @@ public class DrainTile implements RapidComponent {
         lines.add("fifo_wr_en.* TOP");
         lines.add("fifo_din.* TOP");
         lines.add("reset TOP");
-        lines.add("m_axis_downstream.* LEFT");
-        lines.add("s_axis_upstream.* RIGHT");
+        lines.add("m_axis_downstream.* RIGHT");
+        lines.add("s_axis_upstream.* LEFT");
         return InlineFlopTools.parseSideMap(d.getNetlist(), lines);
     }
 }

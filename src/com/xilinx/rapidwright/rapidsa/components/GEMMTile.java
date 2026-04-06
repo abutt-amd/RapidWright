@@ -33,7 +33,6 @@ import com.xilinx.rapidwright.util.FileTools;
 
 import java.io.File;
 import java.util.ArrayList;
-import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 
@@ -52,30 +51,19 @@ public class GEMMTile implements RapidComponent {
     }
 
     @Override
-    public List<String> getVerilogFiles() {
+    public List<String> getDesignTclLines() {
         String rapidWrightPath = FileTools.getRapidWrightPath();
         if (rapidWrightPath == null) {
             throw new RuntimeException("RAPIDWRIGHT_PATH is null");
         }
-        String rapidSAVerilogPath = rapidWrightPath + File.separator + "rapidsa-rtl" +
-                File.separator + "os-sources" + File.separator;
-        List<String> files = new java.util.ArrayList<>();
-        files.add(rapidSAVerilogPath + "pe.sv");
-        files.add(rapidSAVerilogPath + "tile.sv");
-        return files;
-    }
-
-    @Override
-    public String getTopVerilogName() {
-        return "tile";
-    }
-
-    @Override
-    public Map<String, String> getParameterMap() {
-        Map<String, String> parameterMap = new HashMap<>();
-        parameterMap.put("WIDTH", String.valueOf(width));
-        parameterMap.put("HEIGHT", String.valueOf(height));
-        return parameterMap;
+        String rtlPath = rapidWrightPath + File.separator + "rapidsa-rtl"
+                + File.separator + "os-sources" + File.separator;
+        List<String> lines = new ArrayList<>();
+        lines.add("read_verilog -sv " + rtlPath + "pe.sv");
+        lines.add("read_verilog -sv " + rtlPath + "tile.sv");
+        lines.add("set_property generic {WIDTH=" + width + " HEIGHT=" + height + " } [current_fileset]");
+        lines.add("set_property top tile [current_fileset]");
+        return lines;
     }
 
     @Override
@@ -92,7 +80,7 @@ public class GEMMTile implements RapidComponent {
     public PBlock getPBlock() {
         Device device = Device.getDevice("xcv80-lsva4737-2MHP-e-S");
         return new PBlock(device,
-                "DSP_X2Y398:DSP_X3Y405 SLICE_X104Y796:SLICE_X119Y811 " +
+                "DSP_X2Y398:DSP_X3Y405 SLICE_X112Y796:SLICE_X119Y811 " +
                         "IRI_QUAD_X72Y3212:IRI_QUAD_X73Y3275 DSP58_CPLX_X1Y398:DSP58_CPLX_X1Y405");
     }
 
@@ -100,10 +88,10 @@ public class GEMMTile implements RapidComponent {
     public Map<EDIFPort, PBlockSide> getSideMap(Design d) {
         List<String> lines = new ArrayList<>();
         lines.add("north_inputs.* TOP");
-        lines.add("accum_shift LEFT");
+        lines.add("accum_shift RIGHT");
         lines.add("south_outputs.* BOTTOM");
-        lines.add("east_outputs.* RIGHT");
-        lines.add("west_inputs.* LEFT");
+        lines.add("east_outputs.* LEFT");
+        lines.add("west_inputs.* RIGHT");
         lines.add("accum_inputs.* TOP");
         lines.add("accum_outputs.* BOTTOM");
         return InlineFlopTools.parseSideMap(d.getNetlist(), lines);

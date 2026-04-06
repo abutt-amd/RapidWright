@@ -44,10 +44,11 @@ import com.xilinx.rapidwright.edif.EDIFNetlist;
 import com.xilinx.rapidwright.edif.EDIFTools;
 import com.xilinx.rapidwright.rapidsa.components.DrainTile;
 import com.xilinx.rapidwright.rapidsa.components.GEMMTile;
-import com.xilinx.rapidwright.rapidsa.components.NorthDCUTile;
+import com.xilinx.rapidwright.rapidsa.components.MM2SChannel;
+import com.xilinx.rapidwright.rapidsa.components.WeightDCUTile;
 import com.xilinx.rapidwright.rapidsa.components.RapidComponent;
 import com.xilinx.rapidwright.rapidsa.components.SAControlFSM;
-import com.xilinx.rapidwright.rapidsa.components.WestDCUTile;
+import com.xilinx.rapidwright.rapidsa.components.InputDCUTile;
 import com.xilinx.rapidwright.util.Pair;
 import joptsimple.OptionParser;
 
@@ -80,6 +81,11 @@ public class RapidSA {
             return;
         }
 
+//        Design d = Design.readCheckpoint("/group/zircon2/abutt/RapidSA/MM2SNOCChannel/PerformanceExplorer/Explore_Explore_0.25_pblock0_SLICE_X322Y868-/routed.dcp");
+//        d.writeCheckpoint("/group/zircon2/abutt/RapidSA/MM2SNOCChannel/pnr.dcp");
+//        if (true)
+//        return;
+
         if (options.has("precompile")) {
             RapidSAPrecompile.precompileRapidSAComponents("RapidSA", part, 2.0);
             return;
@@ -100,6 +106,7 @@ public class RapidSA {
         config.setKernelClockName("clk");
         config.setOutOfContext(false);
         config.setRouteClock(false);
+        config.setFlipPlacementHorizontally(true);
 
         // Create array builder with config
         ArrayBuilder ab = new ArrayBuilder(config);
@@ -107,13 +114,13 @@ public class RapidSA {
 
         ab.createArray();
 
-        // Place NorthDCU tiles above the array
-        Module northDcuModule = loadRelocatableModule("RapidSA", new NorthDCUTile(8), ab.getArray());
-        placeNorthDCUTiles(ab, 8, northDcuModule);
+        // Place WeightDCU tiles above the array
+        Module weightDcuModule = loadRelocatableModule("RapidSA", new WeightDCUTile(8), ab.getArray());
+        placeWeightDCUTiles(ab, 8, weightDcuModule);
 
-        // Place WestDCU tiles left of the array
-        Module westDcuModule = loadRelocatableModule("RapidSA", new WestDCUTile(8), ab.getArray());
-        placeWestDCUTiles(ab, 8, westDcuModule);
+        // Place InputDCU tiles right of the array
+        Module inputDcuModule = loadRelocatableModule("RapidSA", new InputDCUTile(8), ab.getArray());
+        placeInputDCUTiles(ab, 8, inputDcuModule);
 
         // Place SA FSM near top-left of the design
         Module fsmModule = loadRelocatableModule("RapidSA", new SAControlFSM(), ab.getArray());
@@ -124,7 +131,19 @@ public class RapidSA {
         Module drainModule = loadRelocatableModule("RapidSA", new DrainTile(accumCount, 8), ab.getArray());
         placeDrainTiles(ab, 8, drainModule, accumCount);
 
+        // Place MM2S channels near the top of the array
+        Module mm2sModule = loadRelocatableModule("RapidSA", new MM2SChannel(0, ""), ab.getArray());
+        placeMM2SChannels(ab, mm2sModule);
+
         Design arrayDesign = ab.getArray();
+
+        // Update MM2S registers before flattening (deep hierarchy won't survive flatten)
+        MM2SChannel.setTagSource(arrayDesign, "mm2s_a", 0);  // ROW
+        MM2SChannel.setTagSource(arrayDesign, "mm2s_b", 1);  // COL
+        MM2SChannel.setMatrixHeight(arrayDesign, "mm2s_a", 8);
+        MM2SChannel.setMatrixWidth(arrayDesign, "mm2s_a", 8);
+        MM2SChannel.setMatrixHeight(arrayDesign, "mm2s_b", 8);
+        MM2SChannel.setMatrixWidth(arrayDesign, "mm2s_b", 8);
 
         arrayDesign.flattenDesign();
         EDIFTools.uniqueifyNetlist(arrayDesign);
@@ -189,10 +208,10 @@ public class RapidSA {
     }
 
     /**
-     * Places NorthDCU module instances physically above the array,
+     * Places WeightDCU module instances physically above the array,
      * aligned with each column's top-row centroid.
      */
-    private static void placeNorthDCUTiles(ArrayBuilder ab, int nCols, Module dcuModule) {
+    private static void placeWeightDCUTiles(ArrayBuilder ab, int nCols, Module dcuModule) {
         Design arrayDesign = ab.getArray();
         Map<Pair<Integer, Integer>, Site> centroidMap = ab.getLogicalToCentroidMap();
 
@@ -207,7 +226,7 @@ public class RapidSA {
 
         for (int col = 0; col < nCols; col++) {
             Site targetCentroid = centroidMap.get(new Pair<>(col, 0));
-            String instName = "north_dcu_x" + col;
+            String instName = "weight_dcu_x" + col;
 
             ModuleInst mi = arrayDesign.createModuleInst(instName, dcuModule);
 
@@ -256,7 +275,7 @@ public class RapidSA {
             int idValue = col * DCU_UNITS_PER_TILE;
             RegisterInitTools.setRegisterValue(arrayDesign, instName + "/id_reg_reg", idValue, ID_WIDTH);
 
-            System.out.println("  ** PLACED NorthDCU: " + instName + " at " + bestAnchor
+            System.out.println("  ** PLACED WeightDCU: " + instName + " at " + bestAnchor
                     + " (id_reg=" + idValue + ")");
         }
     }
@@ -345,25 +364,31 @@ public class RapidSA {
     }
 
     /**
-     * Places WestDCU module instances physically left of the array,
-     * aligned with each row's first-column centroid.
+     * Places InputDCU module instances physically right of the array,
+     * aligned with each row's last-column centroid.
      */
-    private static void placeWestDCUTiles(ArrayBuilder ab, int nRows, Module dcuModule) {
+    private static void placeInputDCUTiles(ArrayBuilder ab, int nRows, Module dcuModule) {
         Design arrayDesign = ab.getArray();
         Map<Pair<Integer, Integer>, Site> centroidMap = ab.getLogicalToCentroidMap();
 
         RelocatableTileRectangle moduleBoundingBox = dcuModule.getBoundingBox();
         List<RelocatableTileRectangle> placedBoundingBoxes = new ArrayList<>();
 
-        // Compute the array's leftmost column from all placed sites
-        int arrayLeftCol = Integer.MAX_VALUE;
+        // Find number of columns from centroid map
+        int nCols = 0;
+        for (Pair<Integer, Integer> key : centroidMap.keySet()) {
+            nCols = Math.max(nCols, key.getFirst() + 1);
+        }
+
+        // Compute the array's rightmost column from all placed sites
+        int arrayRightCol = Integer.MIN_VALUE;
         for (SiteInst si : arrayDesign.getSiteInsts()) {
-            arrayLeftCol = Math.min(arrayLeftCol, si.getTile().getColumn());
+            arrayRightCol = Math.max(arrayRightCol, si.getTile().getColumn());
         }
 
         for (int row = 0; row < nRows; row++) {
-            Site targetCentroid = centroidMap.get(new Pair<>(0, row));
-            String instName = "west_dcu_y" + row;
+            Site targetCentroid = centroidMap.get(new Pair<>(nCols - 1, row));
+            String instName = "input_dcu_y" + row;
 
             ModuleInst mi = arrayDesign.createModuleInst(instName, dcuModule);
 
@@ -374,8 +399,8 @@ public class RapidSA {
                 RelocatableTileRectangle candidateBB = moduleBoundingBox
                         .getCorresponding(anchor.getTile(), dcuModule.getAnchor().getTile());
 
-                // Right edge of DCU bounding box must be left of array
-                if (candidateBB.getMaxColumn() >= arrayLeftCol) {
+                // Left edge of DCU bounding box must be right of array
+                if (candidateBB.getMinColumn() <= arrayRightCol) {
                     continue;
                 }
 
@@ -412,8 +437,101 @@ public class RapidSA {
             int idValue = row * DCU_UNITS_PER_TILE;
             RegisterInitTools.setRegisterValue(arrayDesign, instName + "/id_reg_reg", idValue, ID_WIDTH);
 
-            System.out.println("  ** PLACED WestDCU: " + instName + " at " + bestAnchor
+            System.out.println("  ** PLACED InputDCU: " + instName + " at " + bestAnchor
                     + " (id_reg=" + idValue + ")");
+        }
+    }
+
+    /**
+     * Places two MM2S channel instances (mm2s_b and mm2s_a) near the top
+     * of the array. mm2s_b is placed first (feeds weight DCU chain),
+     * mm2s_a second (feeds input DCU chain).
+     */
+    private static void placeMM2SChannels(ArrayBuilder ab, Module mm2sModule) {
+        Design arrayDesign = ab.getArray();
+        Map<Pair<Integer, Integer>, Site> centroidMap = ab.getLogicalToCentroidMap();
+        RelocatableTileRectangle moduleBoundingBox = mm2sModule.getBoundingBox();
+
+        // Collect all existing placed bounding boxes
+        List<RelocatableTileRectangle> existingBBs = new ArrayList<>();
+        for (ModuleInst existingMi : arrayDesign.getModuleInsts()) {
+            if (existingMi.isPlaced()) {
+                Module mod = existingMi.getModule();
+                existingBBs.add(mod.getBoundingBox()
+                        .getCorresponding(existingMi.getPlacement().getTile(), mod.getAnchor().getTile()));
+            }
+        }
+
+        // Build occupied tiles set
+        Set<Tile> occupiedTiles = new HashSet<>();
+        for (SiteInst si : arrayDesign.getSiteInsts()) {
+            occupiedTiles.add(si.getTile());
+        }
+
+        // Target: near the top of the array
+        int targetCol = 0;
+        for (SiteInst si : arrayDesign.getSiteInsts()) {
+            targetCol += si.getTile().getColumn();
+        }
+        targetCol /= Math.max(1, arrayDesign.getSiteInsts().size());
+
+        // Target row: above the array (minimum row of all placed sites)
+        int targetRow = Integer.MAX_VALUE;
+        for (SiteInst si : arrayDesign.getSiteInsts()) {
+            targetRow = Math.min(targetRow, si.getTile().getRow());
+        }
+
+        String[] instNames = {"mm2s_b", "mm2s_a"};  // b first (top), a second (below)
+        for (String instName : instNames) {
+            ModuleInst mi = arrayDesign.createModuleInst(instName, mm2sModule);
+            Site bestAnchor = null;
+            int bestDist = Integer.MAX_VALUE;
+
+            for (Site anchor : mm2sModule.getAllValidPlacements()) {
+                RelocatableTileRectangle candidateBB = moduleBoundingBox
+                        .getCorresponding(anchor.getTile(), mm2sModule.getAnchor().getTile());
+
+                // No overlap with existing bounding boxes
+                boolean overlaps = false;
+                for (RelocatableTileRectangle existing : existingBBs) {
+                    if (existing.overlaps(candidateBB)) { overlaps = true; break; }
+                }
+                if (overlaps) continue;
+
+                // No site-level conflicts
+                boolean siteConflict = false;
+                for (SiteInst modSi : mm2sModule.getSiteInsts()) {
+                    Site newSite = mm2sModule.getCorrespondingSite(modSi, anchor);
+                    if (newSite != null && occupiedTiles.contains(newSite.getTile())) {
+                        siteConflict = true; break;
+                    }
+                }
+                if (siteConflict) continue;
+
+                int dist = Math.abs(anchor.getTile().getColumn() - targetCol)
+                         + Math.abs(anchor.getTile().getRow() - targetRow);
+                if (dist < bestDist) {
+                    bestDist = dist;
+                    bestAnchor = anchor;
+                }
+            }
+
+            if (bestAnchor == null) {
+                throw new RuntimeException("Could not find valid placement for " + instName);
+            }
+            if (!mi.place(bestAnchor, false, false)) {
+                throw new RuntimeException("Failed to place " + instName + " at " + bestAnchor);
+            }
+
+            // Track this placement for the next iteration
+            existingBBs.add(moduleBoundingBox
+                    .getCorresponding(bestAnchor.getTile(), mm2sModule.getAnchor().getTile()));
+            for (SiteInst modSi : mm2sModule.getSiteInsts()) {
+                Site newSite = mm2sModule.getCorrespondingSite(modSi, bestAnchor);
+                if (newSite != null) occupiedTiles.add(newSite.getTile());
+            }
+
+            System.out.println("  ** PLACED MM2S: " + instName + " at " + bestAnchor);
         }
     }
 

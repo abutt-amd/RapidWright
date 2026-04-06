@@ -23,11 +23,11 @@
 
 package com.xilinx.rapidwright.design;
 
+import com.xilinx.rapidwright.device.Device;
+import com.xilinx.rapidwright.device.Tile;
+import com.xilinx.rapidwright.examples.AddSubGenerator;
 import org.junit.jupiter.api.Assertions;
 import org.junit.jupiter.api.Test;
-
-import com.xilinx.rapidwright.device.Device;
-import com.xilinx.rapidwright.examples.AddSubGenerator;
 
 public class TestModule {
 
@@ -55,5 +55,18 @@ public class TestModule {
 
         Assertions.assertTrue(slrAdder.isValidPlacement(slrAdder.getAnchor(), top));
         Assertions.assertFalse(slrAdder.isValidPlacement(noSLRAdder.getAnchor(), top));
+    }
+
+    @Test
+    public void testCorrespondingSLLTile() {
+        Device v80 = Device.getDevice("xcv80");
+
+        Tile templateTile = v80.getTile("SLL_X23Y886");
+        Tile originalAnchor = v80.getTile("CLE_W_CORE_X22Y886");
+        Tile newAnchorTile = v80.getTile("CLE_W_CORE_X23Y900");
+        Tile newTile = Module.getCorrespondingTile(templateTile, newAnchorTile, originalAnchor);
+
+        Assertions.assertNotNull(newTile);
+        Assertions.assertEquals("SLL_1_X23Y900", newTile.getName());
     }
 }

@@ -25,15 +25,15 @@
  */
 package com.xilinx.rapidwright.design.blocks;
 
-import java.util.Collections;
-import java.util.HashSet;
-import java.util.Set;
-
 import com.xilinx.rapidwright.design.PBlockCorner;
 import com.xilinx.rapidwright.device.ClockRegion;
 import com.xilinx.rapidwright.device.Device;
 import com.xilinx.rapidwright.device.Site;
 import com.xilinx.rapidwright.device.Tile;
+
+import java.util.Collections;
+import java.util.HashSet;
+import java.util.Set;
 
 /**
  * Represents a range of a particular type for a pblock
@@ -222,9 +222,9 @@ public class PBlockRange {
         // We may need to expand column to include outward facing CLB/DSP/BRAM to INT tiles
         if (isSiteRange()) {
             Tile t = getLowerLeftSite().getIntTile();
-            if (t.getColumn() < colMin) colMin = t.getColumn();
+            if (t != null && t.getColumn() < colMin) colMin = t.getColumn();
             t = getUpperRightSite().getIntTile();
-            if (t.getColumn() > colMax) colMax = t.getColumn();
+            if (t != null && t.getColumn() > colMax) colMax = t.getColumn();
         }
 
         for (int col=colMin; col <= colMax; col++) {

@@ -33,9 +33,7 @@ import java.util.Map;
 
 public interface RapidComponent {
     String getComponentName();
-    List<String> getVerilogFiles();
-    String getTopVerilogName();
-    Map<String, String> getParameterMap();
+    List<String> getDesignTclLines();
     String getClkName();
     String getResetName();
     PBlock getPBlock();

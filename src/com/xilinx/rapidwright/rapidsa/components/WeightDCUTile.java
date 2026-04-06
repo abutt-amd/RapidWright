@@ -34,16 +34,15 @@ import com.xilinx.rapidwright.util.FileTools;
 
 import java.io.File;
 import java.util.ArrayList;
-import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 
-public class NorthDCUTile implements RapidComponent {
+public class WeightDCUTile implements RapidComponent {
     final private int width;
     private static final int ID_WIDTH = 8;
     private static final String ID_REG_BASE_NAME = "id_reg_reg";
 
-    public NorthDCUTile(int width) {
+    public WeightDCUTile(int width) {
         this.width = width;
     }
 
@@ -59,33 +58,22 @@ public class NorthDCUTile implements RapidComponent {
 
     @Override
     public String getComponentName() {
-        return "NorthDCUTile";
+        return "WeightDCUTile";
     }
 
     @Override
-    public List<String> getVerilogFiles() {
-        String rapidWrightPath = FileTools.getRapidWrightPath();
-        String rapidSAVerilogPath = rapidWrightPath + File.separator + "rapidsa-rtl" +
-                File.separator + "os-sources" + File.separator;
-        List<String> files = new java.util.ArrayList<>();
-        files.add(rapidSAVerilogPath + "fifo.sv");
-        files.add(rapidSAVerilogPath + "fifo_tile.sv");
-        files.add(rapidSAVerilogPath + "skid_buffer.sv");
-        files.add(rapidSAVerilogPath + "daisy_chain_loader.sv");
-        files.add(rapidSAVerilogPath + "dcu_fifo_tile_north.sv");
-        return files;
-    }
-
-    @Override
-    public String getTopVerilogName() {
-        return "dcu_fifo_tile_north";
-    }
-
-    @Override
-    public Map<String, String> getParameterMap() {
-        Map<String, String> parameterMap = new HashMap<>();
-        parameterMap.put("NUM_UNITS", String.valueOf(width));
-        return parameterMap;
+    public List<String> getDesignTclLines() {
+        String rtlPath = FileTools.getRapidWrightPath() + File.separator + "rapidsa-rtl"
+                + File.separator + "os-sources" + File.separator;
+        List<String> lines = new ArrayList<>();
+        lines.add("read_verilog -sv " + rtlPath + "fifo.sv");
+        lines.add("read_verilog -sv " + rtlPath + "fifo_tile.sv");
+        lines.add("read_verilog -sv " + rtlPath + "skid_buffer.sv");
+        lines.add("read_verilog -sv " + rtlPath + "daisy_chain_loader.sv");
+        lines.add("read_verilog -sv " + rtlPath + "dcu_fifo_tile_weight.sv");
+        lines.add("set_property generic {NUM_UNITS=" + width + " } [current_fileset]");
+        lines.add("set_property top dcu_fifo_tile_weight [current_fileset]");
+        return lines;
     }
 
     @Override
@@ -102,17 +90,17 @@ public class NorthDCUTile implements RapidComponent {
     public PBlock getPBlock() {
         Device device = Device.getDevice("xcv80-lsva4737-2MHP-e-S");
         return new PBlock(device,
-                "DSP_X0Y448:DSP_X1Y451 SLICE_X84Y896:SLICE_X99Y903 " +
-                        "IRI_QUAD_X58Y3612:IRI_QUAD_X59Y3643 DSP58_CPLX_X0Y448:DSP58_CPLX_X0Y451");
+                "DSP_X0Y444:DSP_X1Y447 SLICE_X84Y888:SLICE_X99Y895 " +
+                        "IRI_QUAD_X58Y3580:IRI_QUAD_X59Y3611 DSP58_CPLX_X0Y444:DSP58_CPLX_X0Y447");
     }
 
     @Override
     public Map<EDIFPort, PBlockSide> getSideMap(Design d) {
         List<String> lines = new ArrayList<>();
-        lines.add("s_.* LEFT");
-        lines.add("reset LEFT");
-        lines.add("m_.* RIGHT");
-        lines.add("rd_en LEFT");
+        lines.add("s_.* RIGHT");
+        lines.add("reset RIGHT");
+        lines.add("m_.* LEFT");
+        lines.add("rd_en RIGHT");
         lines.add("dout.* BOTTOM");
         Map<EDIFPort, PBlockSide> map = InlineFlopTools.parseSideMap(d.getNetlist(), lines);
         return map;

@@ -34,16 +34,15 @@ import com.xilinx.rapidwright.util.FileTools;
 
 import java.io.File;
 import java.util.ArrayList;
-import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 
-public class WestDCUTile implements RapidComponent {
+public class InputDCUTile implements RapidComponent {
     final private int height;
     private static final int ID_WIDTH = 8;
     private static final String ID_REG_BASE_NAME = "id_reg_reg";
 
-    public WestDCUTile(int height) {
+    public InputDCUTile(int height) {
         this.height = height;
     }
 
@@ -59,33 +58,22 @@ public class WestDCUTile implements RapidComponent {
 
     @Override
     public String getComponentName() {
-        return "WestDCUTile";
+        return "InputDCUTile";
     }
 
     @Override
-    public List<String> getVerilogFiles() {
-        String rapidWrightPath = FileTools.getRapidWrightPath();
-        String rapidSAVerilogPath = rapidWrightPath + File.separator + "rapidsa-rtl" +
-                File.separator + "os-sources" + File.separator;
-        List<String> files = new ArrayList<>();
-        files.add(rapidSAVerilogPath + "fifo.sv");
-        files.add(rapidSAVerilogPath + "fifo_tile.sv");
-        files.add(rapidSAVerilogPath + "skid_buffer.sv");
-        files.add(rapidSAVerilogPath + "daisy_chain_loader.sv");
-        files.add(rapidSAVerilogPath + "dcu_fifo_tile_west.sv");
-        return files;
-    }
-
-    @Override
-    public String getTopVerilogName() {
-        return "dcu_fifo_tile_west";
-    }
-
-    @Override
-    public Map<String, String> getParameterMap() {
-        Map<String, String> parameterMap = new HashMap<>();
-        parameterMap.put("NUM_UNITS", String.valueOf(height));
-        return parameterMap;
+    public List<String> getDesignTclLines() {
+        String rtlPath = FileTools.getRapidWrightPath() + File.separator + "rapidsa-rtl"
+                + File.separator + "os-sources" + File.separator;
+        List<String> lines = new ArrayList<>();
+        lines.add("read_verilog -sv " + rtlPath + "fifo.sv");
+        lines.add("read_verilog -sv " + rtlPath + "fifo_tile.sv");
+        lines.add("read_verilog -sv " + rtlPath + "skid_buffer.sv");
+        lines.add("read_verilog -sv " + rtlPath + "daisy_chain_loader.sv");
+        lines.add("read_verilog -sv " + rtlPath + "dcu_fifo_tile_input.sv");
+        lines.add("set_property generic {NUM_UNITS=" + height + " } [current_fileset]");
+        lines.add("set_property top dcu_fifo_tile_input [current_fileset]");
+        return lines;
     }
 
     @Override
@@ -112,7 +100,7 @@ public class WestDCUTile implements RapidComponent {
         lines.add("reset TOP");
         lines.add("m_.* BOTTOM");
         lines.add("rd_en TOP");
-        lines.add("dout.* RIGHT");
+        lines.add("dout.* LEFT");
         return InlineFlopTools.parseSideMap(d.getNetlist(), lines);
     }
 }

@@ -1,6 +1,6 @@
 `timescale 1ns / 1ps
 
-module dcu_fifo_tile_north #(
+module dcu_fifo_tile_input #(
     parameter DATA_WIDTH = 8,
     parameter TAG_WIDTH = 8,
     parameter NUM_UNITS = 4,

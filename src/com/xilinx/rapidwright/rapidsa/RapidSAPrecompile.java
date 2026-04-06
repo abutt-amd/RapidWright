@@ -29,15 +29,12 @@ import com.xilinx.rapidwright.design.blocks.PBlockSide;
 import com.xilinx.rapidwright.device.Part;
 import com.xilinx.rapidwright.edif.EDIFPort;
 import com.xilinx.rapidwright.edif.EDIFTools;
-import com.xilinx.rapidwright.rapidsa.components.NorthDCUTile;
+import com.xilinx.rapidwright.rapidsa.components.MM2SNOCChannel;
 import com.xilinx.rapidwright.rapidsa.components.RapidComponent;
-import com.xilinx.rapidwright.rapidsa.components.SAControlFSM;
-import com.xilinx.rapidwright.rapidsa.components.WestDCUTile;
 import com.xilinx.rapidwright.util.FileTools;
 import com.xilinx.rapidwright.util.PerformanceExplorer;
 import com.xilinx.rapidwright.util.PlacerDirective;
 import com.xilinx.rapidwright.util.RouterDirective;
-import com.xilinx.rapidwright.util.VivadoTools;
 
 import java.io.File;
 import java.io.IOException;
@@ -71,39 +68,28 @@ public class RapidSAPrecompile {
     private static final List<RapidComponent> COMPONENTS = Collections.unmodifiableList(
             Arrays.asList(
 //                    new GEMMTile(4, 4),
-                    new NorthDCUTile(4),
-                    new WestDCUTile(4),
+//                    new WeightDCUTile(4)
+//                    new InputDCUTile(4),
 //                    new DrainTile(4, 16),
-                    new SAControlFSM()
+//                    new MM2SChannel(0, "/group/zircon2/abutt/integrated-sa/count_512_clean.mem")
+                    new MM2SNOCChannel()
+//                    new SAControlFSM()
             )
     );
 
     private static List<String> getSynthTclScript(Part part, String compOutputDir,
                                                   RapidComponent component) {
         List<String> lines = new ArrayList<>();
-        lines.add("set top_module \"" + component.getTopVerilogName() + "\"");
         lines.add("set part \"" + part.toString() + "\"");
         lines.add("set output_dir \"" + compOutputDir + "\"");
         lines.add("file mkdir $output_dir");
+        lines.add("create_project -in_memory -part $part rapid_synth_proj");
 
-        for (String rtlFile : component.getVerilogFiles()) {
-            lines.add("read_verilog -sv " + rtlFile);
-        }
+        lines.addAll(component.getDesignTclLines());
 
         lines.add("read_xdc " + compOutputDir + File.separator + XDC_NAME);
-
-        if (!component.getParameterMap().isEmpty()) {
-            StringBuilder params = new StringBuilder();
-            for (Map.Entry<String, String> param : component.getParameterMap().entrySet()) {
-                params.append(param.getKey());
-                params.append("=");
-                params.append(param.getValue());
-                params.append(" ");
-            }
-            lines.add("set_property generic {" + params + "} [current_fileset]");
-        }
-
-        lines.add("synth_design -mode out_of_context -top $top_module -part $part");
+        lines.add("update_compile_order -fileset sources_1");
+        lines.add("synth_design -mode out_of_context -flatten_hierarchy none -part $part");
         lines.add("write_checkpoint -force $output_dir/" + SYNTH_DCP_NAME);
         lines.add("write_edif -force $output_dir/" + SYNTH_EDF_NAME);
 
@@ -132,7 +118,7 @@ public class RapidSAPrecompile {
 
             Path outputLog = Paths.get(compOutputDir, "synth.log");
             System.out.println("Running Vivado");
-            VivadoTools.runTcl(outputLog, Paths.get(scriptName), true);
+//            VivadoTools.runTcl(outputLog, Paths.get(scriptName), true);
             System.out.println("Vivado finished");
 
             String synthDcpName = compOutputDir + File.separator + SYNTH_DCP_NAME;
@@ -141,6 +127,7 @@ public class RapidSAPrecompile {
             EDIFTools.ensurePreservedInterfaceVivado(d.getNetlist());
 
             String peRunDir = compOutputDir + File.separator + PE_RUN_DIR;
+            FileTools.deleteFolderContents(peRunDir);
             PerformanceExplorer pe = new PerformanceExplorer(d, peRunDir, component.getClkName(), clkPeriod);
 
             pe.setMinClockUncertainty(DEFAULT_MIN_CLK_UNCERT);
@@ -168,9 +155,9 @@ public class RapidSAPrecompile {
 
             boolean success = pe.explorePerformance();
 
-            if (!success) {
-                throw new RuntimeException("PerformanceExplorer failed in RapidSA");
-            }
+//            if (!success) {
+//                throw new RuntimeException("PerformanceExplorer failed in RapidSA");
+//            }
 
             pe.getBestDesignPerPBlock();
             try {

@@ -34,7 +34,6 @@ import com.xilinx.rapidwright.util.FileTools;
 
 import java.io.File;
 import java.util.ArrayList;
-import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 
@@ -70,24 +69,13 @@ public class SAControlFSM implements RapidComponent {
     }
 
     @Override
-    public List<String> getVerilogFiles() {
-        String rapidWrightPath = FileTools.getRapidWrightPath();
-        String rapidSAVerilogPath = rapidWrightPath + File.separator + "rapidsa-rtl" +
-                File.separator + "os-sources" + File.separator;
-        List<String> files = new java.util.ArrayList<>();
-        files.add(rapidSAVerilogPath + "sa_fsm.sv");
-        return files;
-    }
-
-    @Override
-    public String getTopVerilogName() {
-        return "sa_fsm";
-    }
-
-    @Override
-    public Map<String, String> getParameterMap() {
-        Map<String, String> parameterMap = new HashMap<>();
-        return parameterMap;
+    public List<String> getDesignTclLines() {
+        String rtlPath = FileTools.getRapidWrightPath() + File.separator + "rapidsa-rtl"
+                + File.separator + "os-sources" + File.separator;
+        List<String> lines = new ArrayList<>();
+        lines.add("read_verilog -sv " + rtlPath + "sa_fsm.sv");
+        lines.add("set_property top sa_fsm [current_fileset]");
+        return lines;
     }
 
     @Override
@@ -110,9 +98,9 @@ public class SAControlFSM implements RapidComponent {
     @Override
     public Map<EDIFPort, PBlockSide> getSideMap(Design d) {
         List<String> lines = new ArrayList<>();
-        lines.add("start LEFT");
+        lines.add("start RIGHT");
         lines.add("a_rd_en BOTTOM");
-        lines.add("b_rd_en RIGHT");
+        lines.add("b_rd_en LEFT");
         lines.add("output_wr_en BOTTOM");
         lines.add("done BOTTOM");
         lines.add("sa_accum_shift BOTTOM");

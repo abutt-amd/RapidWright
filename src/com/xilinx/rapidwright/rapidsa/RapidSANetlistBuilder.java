@@ -34,10 +34,11 @@ import com.xilinx.rapidwright.edif.EDIFPort;
 import com.xilinx.rapidwright.edif.EDIFTools;
 import com.xilinx.rapidwright.rapidsa.components.DrainTile;
 import com.xilinx.rapidwright.rapidsa.components.GEMMTile;
-import com.xilinx.rapidwright.rapidsa.components.NorthDCUTile;
+import com.xilinx.rapidwright.rapidsa.components.MM2SChannel;
+import com.xilinx.rapidwright.rapidsa.components.WeightDCUTile;
 import com.xilinx.rapidwright.rapidsa.components.RapidComponent;
 import com.xilinx.rapidwright.rapidsa.components.SAControlFSM;
-import com.xilinx.rapidwright.rapidsa.components.WestDCUTile;
+import com.xilinx.rapidwright.rapidsa.components.InputDCUTile;
 
 import java.io.File;
 import java.util.Map;
@@ -48,12 +49,12 @@ import java.util.TreeMap;
  *
  * Topology (nRows x nCols):
  *
- *                    NorthDCU_x0  NorthDCU_x1  ...  NorthDCU_x{nCols-1}
+ *                    WeightDCU_x0  WeightDCU_x1  ...  WeightDCU_x{nCols-1}
  *
- *   WestDCU_y0      tile_x0y0    tile_x1y0    ...  tile_x{nCols-1}y0
- *   WestDCU_y1      tile_x0y1    tile_x1y1    ...  tile_x{nCols-1}y1
+ *   InputDCU_y0      tile_x0y0    tile_x1y0    ...  tile_x{nCols-1}y0
+ *   InputDCU_y1      tile_x0y1    tile_x1y1    ...  tile_x{nCols-1}y1
  *     ...             ...          ...               ...
- *   WestDCU_y{nR-1} tile_x0y{N}  tile_x1y{N}  ...  tile_x{nCols-1}y{nRows-1}
+ *   InputDCU_y{nR-1} tile_x0y{N}  tile_x1y{N}  ...  tile_x{nCols-1}y{nRows-1}
  *
  *                                SAControlFSM
  */
@@ -98,6 +99,18 @@ public class RapidSANetlistBuilder {
     private static final String DRAIN_S_TVALID   = "s_axis_upstream_tvalid";
     private static final String DRAIN_S_TREADY   = "s_axis_upstream_tready";
 
+    // MM2S channel ports
+    private static final String MM2S_M_DATA         = "m_data_a";
+    private static final String MM2S_M_TAG          = "m_tag_a";
+    private static final String MM2S_M_VALID        = "m_valid_a";
+    private static final String MM2S_M_READY        = "m_ready_a";
+    private static final String MM2S_START           = "start_mm2s_a";
+    private static final String MM2S_SRC_ADDR        = "src_addr_mm2s_a";
+    private static final String MM2S_TRANSFER_LEN    = "transfer_length_mm2s_a";
+    private static final String MM2S_DONE            = "done_mm2s_a";
+    private static final String MM2S_BUSY            = "busy_mm2s_a";
+    private static final String MM2S_ERROR           = "error_mm2s_a";
+
     // FSM ports
     private static final String FSM_START          = "start";
     private static final String FSM_A_RD_EN        = "a_rd_en";
@@ -118,9 +131,10 @@ public class RapidSANetlistBuilder {
     public static Design createSystolicArrayNetlist(int nRows, int nCols, String partName,
                                                     String precompileDir) {
         RapidComponent gemmComponent = new GEMMTile(nCols, nRows);
-        RapidComponent northDcuComponent = new NorthDCUTile(nCols);
-        RapidComponent westDcuComponent = new WestDCUTile(nRows);
+        RapidComponent weightDcuComponent = new WeightDCUTile(nCols);
+        RapidComponent inputDcuComponent = new InputDCUTile(nRows);
         RapidComponent fsmComponent = new SAControlFSM();
+        RapidComponent mm2sComponent = new MM2SChannel(0, "");
         if (nRows <= 0 || nCols <= 0) {
             throw new IllegalArgumentException(
                     "Array dimensions must be positive: nRows=" + nRows + ", nCols=" + nCols);
@@ -128,18 +142,21 @@ public class RapidSANetlistBuilder {
 
         // Load component cells from precompiled DCPs
         EDIFCell gemmCell = loadComponentCell(precompileDir, gemmComponent);
-        EDIFCell northDcuCell = loadComponentCell(precompileDir, northDcuComponent);
-        EDIFCell westDcuCell = loadComponentCell(precompileDir, westDcuComponent);
+        EDIFCell weightDcuCell = loadComponentCell(precompileDir, weightDcuComponent);
+        EDIFCell inputDcuCell = loadComponentCell(precompileDir, inputDcuComponent);
         EDIFCell fsmCell = loadComponentCell(precompileDir, fsmComponent);
+        EDIFCell mm2sCell = loadComponentCell(precompileDir, mm2sComponent);
 
         // Get clock and reset port names from component definitions
         String gemmClk = gemmComponent.getClkName();
-        String northDcuClk = northDcuComponent.getClkName();
-        String northDcuRst = northDcuComponent.getResetName();
-        String westDcuClk = westDcuComponent.getClkName();
-        String westDcuRst = westDcuComponent.getResetName();
+        String weightDcuClk = weightDcuComponent.getClkName();
+        String weightDcuRst = weightDcuComponent.getResetName();
+        String inputDcuClk = inputDcuComponent.getClkName();
+        String inputDcuRst = inputDcuComponent.getResetName();
         String fsmClk = fsmComponent.getClkName();
         String fsmRst = fsmComponent.getResetName();
+        String mm2sClk = mm2sComponent.getClkName();
+        String mm2sRst = mm2sComponent.getResetName();
 
         // Create top-level design and migrate component cells (collision handling for shared dcu_fifo_tile)
         Design design = new Design("systolic_array", partName);
@@ -147,25 +164,27 @@ public class RapidSANetlistBuilder {
         EDIFNetlist netlist = design.getNetlist();
 
         netlist.migrateCellAndSubCells(gemmCell, true);
-        netlist.migrateCellAndSubCells(northDcuCell, true);
-        netlist.migrateCellAndSubCells(westDcuCell, true);
+        netlist.migrateCellAndSubCells(weightDcuCell, true);
+        netlist.migrateCellAndSubCells(inputDcuCell, true);
         netlist.migrateCellAndSubCells(fsmCell, true);
+        netlist.migrateCellAndSubCells(mm2sCell, true);
 
         // Strip internals to make each cell a black box
         gemmCell.makePrimitive();
-        northDcuCell.makePrimitive();
-        westDcuCell.makePrimitive();
+        weightDcuCell.makePrimitive();
+        inputDcuCell.makePrimitive();
         fsmCell.makePrimitive();
+        mm2sCell.makePrimitive();
 
         EDIFCell topCell = netlist.getTopCell();
 
         // Determine bus widths and array sizes from component ports
-        int dataWidth = getPortWidth(northDcuCell, DCU_S_DATA);
-        int tagWidth = getPortWidth(northDcuCell, DCU_S_TAG);
+        int dataWidth = getPortWidth(weightDcuCell, DCU_S_DATA);
+        int tagWidth = getPortWidth(weightDcuCell, DCU_S_TAG);
         int dataBits = getPortWidth(gemmCell, GEMM_NORTH_INPUTS + "[0]");
         int accumBits = getPortWidth(gemmCell, GEMM_ACCUM_INPUTS + "[0]");
-        int numUnitsNorth = countArrayPorts(northDcuCell, DCU_DOUT);
-        int numUnitsWest = countArrayPorts(westDcuCell, DCU_DOUT);
+        int numUnitsNorth = countArrayPorts(weightDcuCell, DCU_DOUT);
+        int numUnitsWest = countArrayPorts(inputDcuCell, DCU_DOUT);
         int eastCount = countArrayPorts(gemmCell, GEMM_EAST_OUTPUTS);
         int southCount = countArrayPorts(gemmCell, GEMM_SOUTH_OUTPUTS);
         int accumCount = countArrayPorts(gemmCell, GEMM_ACCUM_INPUTS);
@@ -178,7 +197,7 @@ public class RapidSANetlistBuilder {
         netlist.migrateCellAndSubCells(drainCell, true);
         drainCell.makePrimitive();
 
-        int dcuDoutWidth = getPortWidth(northDcuCell, DCU_DOUT + "[0]");
+        int dcuDoutWidth = getPortWidth(weightDcuCell, DCU_DOUT + "[0]");
         if (dcuDoutWidth != dataBits) {
             throw new RuntimeException(
                     "DCU dout width (" + dcuDoutWidth + ") does not match GEMM tile input width (" + dataBits + ")");
@@ -190,15 +209,18 @@ public class RapidSANetlistBuilder {
             for (int c = 0; c < nCols; c++)
                 gemmInsts[r][c] = createBlackBox(topCell, "tile_x" + c + "y" + r, gemmCell);
 
-        EDIFCellInst[] northDcuInsts = new EDIFCellInst[nCols];
+        EDIFCellInst[] weightDcuInsts = new EDIFCellInst[nCols];
         for (int i = 0; i < nCols; i++)
-            northDcuInsts[i] = createBlackBox(topCell, "north_dcu_x" + i, northDcuCell);
+            weightDcuInsts[i] = createBlackBox(topCell, "weight_dcu_x" + i, weightDcuCell);
 
-        EDIFCellInst[] westDcuInsts = new EDIFCellInst[nRows];
+        EDIFCellInst[] inputDcuInsts = new EDIFCellInst[nRows];
         for (int i = 0; i < nRows; i++)
-            westDcuInsts[i] = createBlackBox(topCell, "west_dcu_y" + i, westDcuCell);
+            inputDcuInsts[i] = createBlackBox(topCell, "input_dcu_y" + i, inputDcuCell);
 
         EDIFCellInst fsmInst = createBlackBox(topCell, "sa_fsm", fsmCell);
+
+        EDIFCellInst mm2sAInst = createBlackBox(topCell, "mm2s_a", mm2sCell);
+        EDIFCellInst mm2sBInst = createBlackBox(topCell, "mm2s_b", mm2sCell);
 
         EDIFCellInst[] drainInsts = new EDIFCellInst[nCols];
         for (int i = 0; i < nCols; i++)
@@ -210,23 +232,24 @@ public class RapidSANetlistBuilder {
         EDIFPort topStart = topCell.createPort("start", EDIFDirection.INPUT, 1);
         EDIFPort topDone = topCell.createPort("done", EDIFDirection.OUTPUT, 1);
 
-        EDIFPort topBSData = createBusPort(topCell, "b_s_data", EDIFDirection.INPUT, dataWidth);
-        EDIFPort topBSTag = createBusPort(topCell, "b_s_tag", EDIFDirection.INPUT, tagWidth);
-        EDIFPort topBSValid = topCell.createPort("b_s_valid", EDIFDirection.INPUT, 1);
-        EDIFPort topBSReady = topCell.createPort("b_s_ready", EDIFDirection.OUTPUT, 1);
-        EDIFPort topBMData = createBusPort(topCell, "b_m_data", EDIFDirection.OUTPUT, dataWidth);
-        EDIFPort topBMTag = createBusPort(topCell, "b_m_tag", EDIFDirection.OUTPUT, tagWidth);
-        EDIFPort topBMValid = topCell.createPort("b_m_valid", EDIFDirection.OUTPUT, 1);
-        EDIFPort topBMReady = topCell.createPort("b_m_ready", EDIFDirection.INPUT, 1);
+        // MM2S channel A control/status ports (feeds west DCUs)
+        int srcAddrWidth = getPortWidth(mm2sCell, MM2S_SRC_ADDR);
+        int transferLenWidth = getPortWidth(mm2sCell, MM2S_TRANSFER_LEN);
 
-        EDIFPort topASData = createBusPort(topCell, "a_s_data", EDIFDirection.INPUT, dataWidth);
-        EDIFPort topASTag = createBusPort(topCell, "a_s_tag", EDIFDirection.INPUT, tagWidth);
-        EDIFPort topASValid = topCell.createPort("a_s_valid", EDIFDirection.INPUT, 1);
-        EDIFPort topASReady = topCell.createPort("a_s_ready", EDIFDirection.OUTPUT, 1);
-        EDIFPort topAMData = createBusPort(topCell, "a_m_data", EDIFDirection.OUTPUT, dataWidth);
-        EDIFPort topAMTag = createBusPort(topCell, "a_m_tag", EDIFDirection.OUTPUT, tagWidth);
-        EDIFPort topAMValid = topCell.createPort("a_m_valid", EDIFDirection.OUTPUT, 1);
-        EDIFPort topAMReady = topCell.createPort("a_m_ready", EDIFDirection.INPUT, 1);
+        EDIFPort topStartA = topCell.createPort("start_mm2s_a", EDIFDirection.INPUT, 1);
+        EDIFPort topSrcAddrA = createBusPort(topCell, "src_addr_mm2s_a", EDIFDirection.INPUT, srcAddrWidth);
+        EDIFPort topTransferLenA = createBusPort(topCell, "transfer_length_mm2s_a", EDIFDirection.INPUT, transferLenWidth);
+        EDIFPort topDoneA = topCell.createPort("done_mm2s_a", EDIFDirection.OUTPUT, 1);
+        EDIFPort topBusyA = topCell.createPort("busy_mm2s_a", EDIFDirection.OUTPUT, 1);
+        EDIFPort topErrorA = topCell.createPort("error_mm2s_a", EDIFDirection.OUTPUT, 1);
+
+        // MM2S channel B control/status ports (feeds north DCUs)
+        EDIFPort topStartB = topCell.createPort("start_mm2s_b", EDIFDirection.INPUT, 1);
+        EDIFPort topSrcAddrB = createBusPort(topCell, "src_addr_mm2s_b", EDIFDirection.INPUT, srcAddrWidth);
+        EDIFPort topTransferLenB = createBusPort(topCell, "transfer_length_mm2s_b", EDIFDirection.INPUT, transferLenWidth);
+        EDIFPort topDoneB = topCell.createPort("done_mm2s_b", EDIFDirection.OUTPUT, 1);
+        EDIFPort topBusyB = topCell.createPort("busy_mm2s_b", EDIFDirection.OUTPUT, 1);
+        EDIFPort topErrorB = topCell.createPort("error_mm2s_b", EDIFDirection.OUTPUT, 1);
 
         // Clock: fans out to all instances
         EDIFNet clkNet = topCell.createNet("clk");
@@ -236,26 +259,32 @@ public class RapidSANetlistBuilder {
             for (int c = 0; c < nCols; c++)
                 clkNet.createPortInst(gemmClk, gemmInsts[r][c]);
         for (int i = 0; i < nCols; i++)
-            clkNet.createPortInst(northDcuClk, northDcuInsts[i]);
+            clkNet.createPortInst(weightDcuClk, weightDcuInsts[i]);
         for (int i = 0; i < nRows; i++)
-            clkNet.createPortInst(westDcuClk, westDcuInsts[i]);
+            clkNet.createPortInst(inputDcuClk, inputDcuInsts[i]);
         for (int i = 0; i < nCols; i++)
             clkNet.createPortInst(drainClk, drainInsts[i]);
+        clkNet.createPortInst(mm2sClk, mm2sAInst);
+        clkNet.createPortInst(mm2sClk, mm2sBInst);
 
         // rst_n: fans out to all DCU instances
         EDIFNet rstNNet = topCell.createNet("rst_n");
         rstNNet.createPortInst(topRstN);
-        if (northDcuRst != null) {
+        if (weightDcuRst != null) {
             for (int i = 0; i < nCols; i++)
-                rstNNet.createPortInst(northDcuRst, northDcuInsts[i]);
+                rstNNet.createPortInst(weightDcuRst, weightDcuInsts[i]);
         }
-        if (westDcuRst != null) {
+        if (inputDcuRst != null) {
             for (int i = 0; i < nRows; i++)
-                rstNNet.createPortInst(westDcuRst, westDcuInsts[i]);
+                rstNNet.createPortInst(inputDcuRst, inputDcuInsts[i]);
         }
         if (drainRst != null) {
             for (int i = 0; i < nCols; i++)
                 rstNNet.createPortInst(drainRst, drainInsts[i]);
+        }
+        if (mm2sRst != null) {
+            rstNNet.createPortInst(mm2sRst, mm2sAInst);
+            rstNNet.createPortInst(mm2sRst, mm2sBInst);
         }
 
         // FSM control connections
@@ -276,6 +305,22 @@ public class RapidSANetlistBuilder {
             connectSingleBit(topCell, "reset", topReset, fsmInst, fsmRst);
         }
 
+        // MM2S channel A control/status connections
+        connectSingleBit(topCell, "start_mm2s_a", topStartA, mm2sAInst, MM2S_START);
+        connectBusPortToTopLevel(topCell, "src_addr_mm2s_a", topSrcAddrA, mm2sAInst, MM2S_SRC_ADDR, srcAddrWidth);
+        connectBusPortToTopLevel(topCell, "transfer_length_mm2s_a", topTransferLenA, mm2sAInst, MM2S_TRANSFER_LEN, transferLenWidth);
+        connectSingleBit(topCell, "done_mm2s_a", topDoneA, mm2sAInst, MM2S_DONE);
+        connectSingleBit(topCell, "busy_mm2s_a", topBusyA, mm2sAInst, MM2S_BUSY);
+        connectSingleBit(topCell, "error_mm2s_a", topErrorA, mm2sAInst, MM2S_ERROR);
+
+        // MM2S channel B control/status connections
+        connectSingleBit(topCell, "start_mm2s_b", topStartB, mm2sBInst, MM2S_START);
+        connectBusPortToTopLevel(topCell, "src_addr_mm2s_b", topSrcAddrB, mm2sBInst, MM2S_SRC_ADDR, srcAddrWidth);
+        connectBusPortToTopLevel(topCell, "transfer_length_mm2s_b", topTransferLenB, mm2sBInst, MM2S_TRANSFER_LEN, transferLenWidth);
+        connectSingleBit(topCell, "done_mm2s_b", topDoneB, mm2sBInst, MM2S_DONE);
+        connectSingleBit(topCell, "busy_mm2s_b", topBusyB, mm2sBInst, MM2S_BUSY);
+        connectSingleBit(topCell, "error_mm2s_b", topErrorB, mm2sBInst, MM2S_ERROR);
+
         // FSM sa_accum_shift -> all GEMM tiles
         EDIFNet accumShiftNet = topCell.createNet("sa_accum_shift");
         accumShiftNet.createPortInst(FSM_SA_ACCUM_SHIFT, fsmInst);
@@ -283,62 +328,58 @@ public class RapidSANetlistBuilder {
             for (int c = 0; c < nCols; c++)
                 accumShiftNet.createPortInst(GEMM_ACCUM_SHIFT, gemmInsts[r][c]);
 
-        // FSM b_rd_en -> NorthDCU rd_en daisy chain
+        // FSM b_rd_en -> WeightDCU rd_en daisy chain
         EDIFNet bRdEnNet = topCell.createNet("b_rd_en");
         bRdEnNet.createPortInst(FSM_B_RD_EN, fsmInst);
-        bRdEnNet.createPortInst(DCU_RD_EN, northDcuInsts[0]);
+        bRdEnNet.createPortInst(DCU_RD_EN, weightDcuInsts[0]);
         for (int i = 0; i < nCols - 1; i++) {
             EDIFNet rdEnChain = topCell.createNet("b_rd_en_chain_" + i + "_to_" + (i + 1));
-            rdEnChain.createPortInst(DCU_RD_EN_OUT, northDcuInsts[i]);
-            rdEnChain.createPortInst(DCU_RD_EN, northDcuInsts[i + 1]);
+            rdEnChain.createPortInst(DCU_RD_EN_OUT, weightDcuInsts[i]);
+            rdEnChain.createPortInst(DCU_RD_EN, weightDcuInsts[i + 1]);
         }
 
-        // FSM a_rd_en -> WestDCU rd_en daisy chain
+        // FSM a_rd_en -> InputDCU rd_en daisy chain
         EDIFNet aRdEnNet = topCell.createNet("a_rd_en");
         aRdEnNet.createPortInst(FSM_A_RD_EN, fsmInst);
-        aRdEnNet.createPortInst(DCU_RD_EN, westDcuInsts[0]);
+        aRdEnNet.createPortInst(DCU_RD_EN, inputDcuInsts[0]);
         for (int i = 0; i < nRows - 1; i++) {
             EDIFNet rdEnChain = topCell.createNet("a_rd_en_chain_" + i + "_to_" + (i + 1));
-            rdEnChain.createPortInst(DCU_RD_EN_OUT, westDcuInsts[i]);
-            rdEnChain.createPortInst(DCU_RD_EN, westDcuInsts[i + 1]);
+            rdEnChain.createPortInst(DCU_RD_EN_OUT, inputDcuInsts[i]);
+            rdEnChain.createPortInst(DCU_RD_EN, inputDcuInsts[i + 1]);
         }
 
-        // NorthDCU daisy chain (B matrix)
-        connectDaisyChain(topCell, northDcuInsts,
-                topBSData, topBSTag, topBSValid, topBSReady,
-                topBMData, topBMTag, topBMValid, topBMReady,
-                "b", dataWidth, tagWidth);
+        // WeightDCU daisy chain (B matrix) — MM2S B feeds DCU[0], inter-DCU chain, last DCU output unconnected
+        connectDaisyChainInternal(topCell, weightDcuInsts,
+                mm2sBInst, "b", dataWidth, tagWidth);
 
-        // WestDCU daisy chain (A matrix)
-        connectDaisyChain(topCell, westDcuInsts,
-                topASData, topASTag, topASValid, topASReady,
-                topAMData, topAMTag, topAMValid, topAMReady,
-                "a", dataWidth, tagWidth);
+        // InputDCU daisy chain (A matrix) — MM2S A feeds DCU[0], inter-DCU chain, last DCU output unconnected
+        connectDaisyChainInternal(topCell, inputDcuInsts,
+                mm2sAInst, "a", dataWidth, tagWidth);
 
-        // NorthDCU -> top row GEMM tiles
+        // WeightDCU -> top row GEMM tiles
         for (int col = 0; col < nCols; col++) {
             for (int k = 0; k < numUnitsNorth; k++) {
                 String prefix = "ndcu_x" + col + "_to_tile_x" + col + "y0";
                 connectBusPorts(topCell, prefix + "_data" + k,
-                        northDcuInsts[col], DCU_DOUT + "[" + k + "]",
+                        weightDcuInsts[col], DCU_DOUT + "[" + k + "]",
                         gemmInsts[0][col], GEMM_NORTH_INPUTS + "[" + k + "]",
                         dataBits);
                 connectSingleBit(topCell, prefix + "_valid" + k,
-                        northDcuInsts[col], DCU_DOUT_VALID + "[" + k + "]",
+                        weightDcuInsts[col], DCU_DOUT_VALID + "[" + k + "]",
                         gemmInsts[0][col], GEMM_NORTH_INPUTS_VALID + "[" + k + "]");
             }
         }
 
-        // WestDCU -> left column GEMM tiles
+        // InputDCU -> left column GEMM tiles
         for (int row = 0; row < nRows; row++) {
             for (int k = 0; k < numUnitsWest; k++) {
                 String prefix = "wdcu_y" + row + "_to_tile_x0y" + row;
                 connectBusPorts(topCell, prefix + "_data" + k,
-                        westDcuInsts[row], DCU_DOUT + "[" + k + "]",
+                        inputDcuInsts[row], DCU_DOUT + "[" + k + "]",
                         gemmInsts[row][0], GEMM_WEST_INPUTS + "[" + k + "]",
                         dataBits);
                 connectSingleBit(topCell, prefix + "_valid" + k,
-                        westDcuInsts[row], DCU_DOUT_VALID + "[" + k + "]",
+                        inputDcuInsts[row], DCU_DOUT_VALID + "[" + k + "]",
                         gemmInsts[row][0], GEMM_WEST_INPUTS_VALID + "[" + k + "]");
             }
         }
@@ -507,6 +548,43 @@ public class RapidSANetlistBuilder {
         connectBusPortToTopLevel(topCell, prefix + "_m_tag", topMTag, dcuInsts[n - 1], DCU_M_TAG, tagWidth);
         connectSingleBit(topCell, prefix + "_m_valid", topMValid, dcuInsts[n - 1], DCU_M_VALID);
         connectSingleBit(topCell, prefix + "_m_ready", topMReady, dcuInsts[n - 1], DCU_M_READY);
+    }
+
+    /**
+     * Connects a daisy chain of DCU instances with an MM2S channel feeding DCU[0].
+     * MM2S outputs -> DCU[0].s_*, DCU[i].m_* -> DCU[i+1].s_*, last DCU m_* left unconnected
+     * (m_ready tied to GND).
+     */
+    private static void connectDaisyChainInternal(EDIFCell topCell, EDIFCellInst[] dcuInsts,
+                                                  EDIFCellInst mm2sInst,
+                                                  String prefix, int dataWidth, int tagWidth) {
+        int n = dcuInsts.length;
+        EDIFNet gndNet = EDIFTools.getStaticNet(NetType.GND, topCell, topCell.getLibrary().getNetlist());
+
+        // MM2S outputs -> DCU[0] inputs
+        connectBusPorts(topCell, prefix + "_mm2s_to_dcu0_data",
+                mm2sInst, MM2S_M_DATA, dcuInsts[0], DCU_S_DATA, dataWidth);
+        connectBusPorts(topCell, prefix + "_mm2s_to_dcu0_tag",
+                mm2sInst, MM2S_M_TAG, dcuInsts[0], DCU_S_TAG, tagWidth);
+        connectSingleBit(topCell, prefix + "_mm2s_to_dcu0_valid",
+                mm2sInst, MM2S_M_VALID, dcuInsts[0], DCU_S_VALID);
+        connectSingleBit(topCell, prefix + "_mm2s_to_dcu0_ready",
+                dcuInsts[0], DCU_S_READY, mm2sInst, MM2S_M_READY);
+
+        // Inter-DCU chain
+        for (int i = 0; i < n - 1; i++) {
+            connectBusPorts(topCell, prefix + "_chain_data_" + i + "_to_" + (i + 1),
+                    dcuInsts[i], DCU_M_DATA, dcuInsts[i + 1], DCU_S_DATA, dataWidth);
+            connectBusPorts(topCell, prefix + "_chain_tag_" + i + "_to_" + (i + 1),
+                    dcuInsts[i], DCU_M_TAG, dcuInsts[i + 1], DCU_S_TAG, tagWidth);
+            connectSingleBit(topCell, prefix + "_chain_valid_" + i + "_to_" + (i + 1),
+                    dcuInsts[i], DCU_M_VALID, dcuInsts[i + 1], DCU_S_VALID);
+            connectSingleBit(topCell, prefix + "_chain_ready_" + i + "_to_" + (i + 1),
+                    dcuInsts[i], DCU_M_READY, dcuInsts[i + 1], DCU_S_READY);
+        }
+
+        // Tie last DCU's m_ready to GND (output end unconnected)
+        gndNet.createPortInst(DCU_M_READY, dcuInsts[n - 1]);
     }
 
     private static void connectSingleBit(EDIFCell topCell, String netName,

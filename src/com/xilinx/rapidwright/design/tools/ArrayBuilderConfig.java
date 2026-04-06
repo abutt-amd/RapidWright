@@ -86,6 +86,8 @@ public class ArrayBuilderConfig {
 
     private boolean routeDesign;
 
+    private boolean flipPlacementHorizontally;
+
     private String sideMapFile;
 
     private String workDir;
@@ -544,5 +546,13 @@ public class ArrayBuilderConfig {
 
     public void setSlrCrossingBottomInstName(String slrCrossingBottomInstName) {
         this.slrCrossingBottomInstName = slrCrossingBottomInstName;
+    }
+
+    public boolean isFlipPlacementHorizontally() {
+        return flipPlacementHorizontally;
+    }
+
+    public void setFlipPlacementHorizontally(boolean flipPlacementHorizontally) {
+        this.flipPlacementHorizontally = flipPlacementHorizontally;
     }
 }

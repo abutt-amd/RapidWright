@@ -185,12 +185,13 @@ public class InlineFlopTools {
                 continue;
             }
             Site shiftedSite = shiftSiteToSide(design.getDevice(), start, keepOut, side);
+            boolean internallyUnconnected = true;
             for (int i : port.getBitBlastedIndices()) {
                 EDIFPortInst inst = port.getInternalPortInstFromIndex(i);
                 if (inst == null) {
-                    throw new RuntimeException("Port " + port + " is internally unconnected in design, either " +
-                            "fix the synthesized design for remove from the side map");
+                    continue;
                 }
+                internallyUnconnected = false;
                 if (allLeavesAreIBUF(design, inst)) {
                     continue;
                 }
@@ -203,6 +204,11 @@ public class InlineFlopTools {
                 }
                 Cell flop = createAndPlaceFlopInlineOnTopPortInst(design, inst, loc, clk);
                 siteInstsToRoute.add(flop.getSiteInst());
+            }
+
+            if (internallyUnconnected) {
+                throw new RuntimeException("Port " + port + " is internally unconnected in design, either " +
+                        "fix the synthesized design for remove from the side map");
             }
         }
         for (SiteInst si : siteInstsToRoute) {

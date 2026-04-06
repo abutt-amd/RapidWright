@@ -743,12 +743,13 @@ public class ArrayBuilder {
         Map<Pair<Integer, Integer>, Pair<Integer, Integer>> idealToPhysicalPlacementMap = new HashMap<>();
         int topLeftPhysicalPlacementX = 0;
         int topLeftPhysicalPlacementY = 5;
+        int topRightPhysicalPlacementX = validPlacementGrid.get(topLeftPhysicalPlacementY).size() - 1;
         int lastYCoordinate = 0;
         boolean searchDown = true;
         int numPlaced = 0;
         for (int x = 0; x < idealPlacement.getArrayWidth(); x++) {
             for (int y = 0; y < idealPlacement.getArrayHeight(); y++) {
-                boolean searchRight = (y == 0);
+                boolean searchHorizontally = (y == 0);
                 if (alreadyPlaced.contains(new Pair<>(x, y))) {
                     // Already placed as part of an SLR crossing module
                     continue;
@@ -758,11 +759,15 @@ public class ArrayBuilder {
                 int physY;
                 if (x == 0 && y == 0) {
                     // First element to place
-                    physX = topLeftPhysicalPlacementX;
+                    if (config.isFlipPlacementHorizontally()) {
+                        physX = topRightPhysicalPlacementX;
+                    } else {
+                        physX = topLeftPhysicalPlacementX;
+                    }
                     physY = topLeftPhysicalPlacementY;
                 } else {
                     // Start from previous placement
-                    if (searchRight) {
+                    if (searchHorizontally) {
                         Pair<Integer, Integer> westPrevLoc = idealToPhysicalPlacementMap.get(new Pair<>(x - 1, y));
                         physX = westPrevLoc.getFirst();
                         physY = westPrevLoc.getSecond();
@@ -826,9 +831,15 @@ public class ArrayBuilder {
                     }
                     if (!placed) {
                         // Could not place at proposed anchor, get new proposal
-                        if (searchRight) {
-                            // Search right from physX for valid placement
-                            physX++;
+                        if (searchHorizontally) {
+                            // Search horizontally from physX for valid placement
+                            if (config.isFlipPlacementHorizontally()) {
+                                // Search to the left
+                                physX--;
+                            } else {
+                                // Search to the right
+                                physX++;
+                            }
                             if (physX >= validPlacementGrid.get(physY).size()) {
                                 throw new RuntimeException("Optimal placement is too wide for device");
                             }
@@ -843,71 +854,6 @@ public class ArrayBuilder {
                 }
             }
         }
-//        while (placed < config.getInstCountLimit()) {
-//            if (curr == null) {
-//                int yCoordinate = idealPlacementList.get(i).getFirst().getSecond();
-//                if (yCoordinate > lastYCoordinate) {
-//                    gridX = 0;
-//                    searchDown = true;
-//                }
-//                lastYCoordinate = yCoordinate;
-//            }
-//            Site anchor = validPlacementGrid.get(gridY).get(gridX);
-//            RelocatableTileRectangle newBoundingBox =
-//                    boundingBox.getCorresponding(anchor.getTile(), module.getAnchor().getTile());
-//            if (curr == null) {
-//                if (alreadyPlaced.contains(new Pair<>(gridX, gridY))) {
-//                    i++;
-//                    continue;
-//                }
-//                String topInst = idealPlacementList.get(i).getSecond();
-//                Pair<Integer, Integer> currLoc = idealPlacement.getPlacement(topInst);
-//                if (currLoc.getFirst() == 0 && currLoc.getSecond() == 4) {
-//                    System.out.println();
-//                }
-//                if (nextWillCross) {
-//                    // Create SLR Crossing moduleInst
-//                    String bottomInst = idealPlacement.getInstanceAtLocation(currLoc.getFirst(), currLoc.getSecond() + 1);
-//                    EDIFCellInst mergedCellInst = mergeBlackBoxCells(topInst, bottomInst,
-//                            "x[0].y[0].u_tile", "x[0].y[1].u_tile");
-//                    curr = array.createModuleInst(mergedCellInst.getName(), slrCrossingModule);
-//                    anchor = slrCrossingPlacementGrid.get(anchor.getTile().getSLR()).get(currLoc.getFirst());
-//                    newBoundingBox = slrCrossingModule.getBoundingBox()
-//                            .getCorresponding(anchor.getTile(), slrCrossingModule.getAnchor().getTile());
-//                    i++;
-//                    alreadyPlaced.add(new Pair<>(currLoc.getFirst(), currLoc.getSecond() + 1));
-//                } else {
-//                    // Create regular moduleInst
-//                    String instName = modInstNames == null ? ("inst_" + i) : idealPlacementList.get(i).getSecond();
-//                    curr = array.createModuleInst(instName, module);
-//                    i++;
-//                }
-//            }
-//            RelocatableTileRectangle finalNewBoundingBox = newBoundingBox;
-//            boolean noOverlap = boundingBoxes.stream().noneMatch((b) -> b.overlaps(finalNewBoundingBox));
-//            if (config.isExactPlacement() || (noOverlap && !boundingBoxStraddlesClockRegion(newBoundingBox))) {
-//                if (curr.place(anchor, true, false)) {
-//                    if (config.isExactPlacement() && (straddlesClockRegion(curr)
-//                            || !NetTools.getNetsWithOverlappingNodes(array).isEmpty())
-//                    ) {
-//                        curr.unplace();
-//                    } else {
-//                        boundingBoxes.add(newBoundingBox);
-//                        placed++;
-//                        newPlacementMap.put(curr, anchor);
-//                        System.out.println("  ** PLACED: " + placed + " " + anchor + " " + curr.getName()
-//                                + " " + curr.getAnchor().getTile().getSLR());
-//                        curr = null;
-//                        searchDown = false;
-//                    }
-//                }
-//            }
-//            if (!searchDown) {
-//                gridX++;
-//            } else {
-//                gridY++;
-//            }
-//        }
     }
 
     private void placeArray() {
