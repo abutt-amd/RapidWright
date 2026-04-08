@@ -86,6 +86,7 @@ public class MM2SNOCChannel implements RapidComponent {
         lines.add("add_files " + rtlPath + "mm2s_noc_sequencer.sv");
         lines.add("add_files " + rtlPath + "mm2s_demux_wrapper.v");
         lines.add("add_files " + rtlPath + "mm2s_demux.sv");
+        lines.add("add_files " + rtlPath + "skid_buffer.sv");
         lines.add("set_property source_mgmt_mode All [current_project]");
         lines.add("update_compile_order -fileset sources_1");
 
@@ -153,6 +154,12 @@ public class MM2SNOCChannel implements RapidComponent {
 
         lines.add("create_bd_cell -type module -reference mm2s_demux_wrapper mm2s_demux_wr_0");
 
+        // AXI Register Slice between DMA and NoC
+        lines.add("set axi_reg_slice_0 [create_bd_cell -type ip -vlnv xilinx.com:ip:axi_register_slice:2.1 axi_reg_slice_0]");
+
+        // Update module references to pick up current port lists
+        lines.add("update_module_reference [get_ips]");
+
         // =====================================================================
         // Sequencer ↔ external ports
         // =====================================================================
@@ -176,11 +183,13 @@ public class MM2SNOCChannel implements RapidComponent {
         lines.add("connect_bd_net [get_bd_pins axi_dma_mm2s_ctrl_wr_0/error] [get_bd_pins mm2s_noc_sequencer_wr_0/dma_error]");
 
         // =====================================================================
-        // DMA controller ↔ DMA IP ↔ NoC
+        // DMA controller ↔ DMA IP ↔ Register Slice ↔ NoC
         // =====================================================================
         lines.add("connect_bd_intf_net [get_bd_intf_pins axi_dma_mm2s_ctrl_wr_0/m_axi_lite] "
                 + "[get_bd_intf_pins axi_dma_0/S_AXI_LITE]");
         lines.add("connect_bd_intf_net [get_bd_intf_pins axi_dma_0/M_AXI_MM2S] "
+                + "[get_bd_intf_pins axi_reg_slice_0/S_AXI]");
+        lines.add("connect_bd_intf_net [get_bd_intf_pins axi_reg_slice_0/M_AXI] "
                 + "[get_bd_intf_pins axi_noc_0/S00_AXI]");
 
         // =====================================================================
@@ -233,6 +242,8 @@ public class MM2SNOCChannel implements RapidComponent {
         lines.add("connect_bd_net [get_bd_ports clk] [get_bd_pins data_tag_unit_a_0/clk]");
         lines.add("connect_bd_net [get_bd_ports clk] [get_bd_pins axi_noc_0/aclk0]");
         lines.add("connect_bd_net [get_bd_ports clk] [get_bd_pins mm2s_noc_sequencer_wr_0/clk]");
+        lines.add("connect_bd_net [get_bd_ports clk] [get_bd_pins axi_reg_slice_0/aclk]");
+        lines.add("connect_bd_net [get_bd_ports clk] [get_bd_pins mm2s_demux_wr_0/clk]");
 
         // =====================================================================
         // Reset connections
@@ -241,6 +252,8 @@ public class MM2SNOCChannel implements RapidComponent {
         lines.add("connect_bd_net [get_bd_ports resetn] [get_bd_pins axi_dma_mm2s_ctrl_wr_0/rst_n]");
         lines.add("connect_bd_net [get_bd_ports resetn] [get_bd_pins data_tag_unit_a_0/rst_n]");
         lines.add("connect_bd_net [get_bd_ports resetn] [get_bd_pins mm2s_noc_sequencer_wr_0/rst_n]");
+        lines.add("connect_bd_net [get_bd_ports resetn] [get_bd_pins axi_reg_slice_0/aresetn]");
+        lines.add("connect_bd_net [get_bd_ports resetn] [get_bd_pins mm2s_demux_wr_0/rst_n]");
 
         // =====================================================================
         // Address assignment

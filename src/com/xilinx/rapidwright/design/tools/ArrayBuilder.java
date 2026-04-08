@@ -741,9 +741,9 @@ public class ArrayBuilder {
         List<Pair<Pair<Integer, Integer>, String>> idealPlacementList = idealPlacement.getRowColumnOrderList();
         Set<Pair<Integer, Integer>> alreadyPlaced = new HashSet<>();
         Map<Pair<Integer, Integer>, Pair<Integer, Integer>> idealToPhysicalPlacementMap = new HashMap<>();
-        int topLeftPhysicalPlacementX = 0;
-        int topLeftPhysicalPlacementY = 5;
-        int topRightPhysicalPlacementX = validPlacementGrid.get(topLeftPhysicalPlacementY).size() - 1;
+        int topLeftPhysicalPlacementX = config.getColumnOffset();
+        int topLeftPhysicalPlacementY = config.getRowOffset();
+        int topRightPhysicalPlacementX = validPlacementGrid.get(topLeftPhysicalPlacementY).size() - 1 - config.getColumnOffset();
         int lastYCoordinate = 0;
         boolean searchDown = true;
         int numPlaced = 0;

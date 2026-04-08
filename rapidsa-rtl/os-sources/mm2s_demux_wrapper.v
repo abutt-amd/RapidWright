@@ -6,6 +6,10 @@ module mm2s_demux_wrapper #(
     parameter DATA_WIDTH = 8,
     parameter TAG_WIDTH  = 8
 )(
+    input  wire clk,
+    input  wire rst_n,
+    input wire test,
+
     input  wire sel,
 
     // From DTU (slave side)
@@ -31,6 +35,9 @@ module mm2s_demux_wrapper #(
         .DATA_WIDTH(DATA_WIDTH),
         .TAG_WIDTH(TAG_WIDTH)
     ) inst (
+        .clk       (clk),
+        .rst_n     (rst_n),
+
         .sel       (sel),
 
         .s_data    (s_data),

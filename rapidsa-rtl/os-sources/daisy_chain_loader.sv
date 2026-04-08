@@ -38,7 +38,7 @@ module daisy_chain_loader #(
     logic s_handshake;
     assign s_handshake = s_valid && s_ready;
 
-    assign s_ready = !fifo_full && (!fwd_valid_reg || m_ready);
+    assign s_ready = !fwd_valid_reg || m_ready;
 
     assign fifo_wdata = s_data;
     assign fifo_wen = s_handshake && tag_match;

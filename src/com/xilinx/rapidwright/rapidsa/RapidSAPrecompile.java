@@ -31,10 +31,12 @@ import com.xilinx.rapidwright.edif.EDIFPort;
 import com.xilinx.rapidwright.edif.EDIFTools;
 import com.xilinx.rapidwright.rapidsa.components.MM2SNOCChannel;
 import com.xilinx.rapidwright.rapidsa.components.RapidComponent;
+import com.xilinx.rapidwright.rapidsa.components.S2MMNOCChannel;
 import com.xilinx.rapidwright.util.FileTools;
 import com.xilinx.rapidwright.util.PerformanceExplorer;
 import com.xilinx.rapidwright.util.PlacerDirective;
 import com.xilinx.rapidwright.util.RouterDirective;
+import com.xilinx.rapidwright.util.VivadoTools;
 
 import java.io.File;
 import java.io.IOException;
@@ -68,11 +70,12 @@ public class RapidSAPrecompile {
     private static final List<RapidComponent> COMPONENTS = Collections.unmodifiableList(
             Arrays.asList(
 //                    new GEMMTile(4, 4),
-//                    new WeightDCUTile(4)
-//                    new InputDCUTile(4),
+//                    new WeightDCUTile(4),
+//                    new InputDCUTile(4)
 //                    new DrainTile(4, 16),
 //                    new MM2SChannel(0, "/group/zircon2/abutt/integrated-sa/count_512_clean.mem")
-                    new MM2SNOCChannel()
+                    new MM2SNOCChannel(),
+                    new S2MMNOCChannel()
 //                    new SAControlFSM()
             )
     );
@@ -118,7 +121,7 @@ public class RapidSAPrecompile {
 
             Path outputLog = Paths.get(compOutputDir, "synth.log");
             System.out.println("Running Vivado");
-//            VivadoTools.runTcl(outputLog, Paths.get(scriptName), true);
+            VivadoTools.runTcl(outputLog, Paths.get(scriptName), true);
             System.out.println("Vivado finished");
 
             String synthDcpName = compOutputDir + File.separator + SYNTH_DCP_NAME;

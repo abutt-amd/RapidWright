@@ -23,6 +23,7 @@
 package com.xilinx.rapidwright.design.tools;
 
 import com.xilinx.rapidwright.design.Cell;
+import com.xilinx.rapidwright.design.ConstraintGroup;
 import com.xilinx.rapidwright.design.Design;
 import com.xilinx.rapidwright.design.DesignTools;
 import com.xilinx.rapidwright.design.Net;
@@ -525,6 +526,31 @@ public class InlineFlopTools {
                     .anyMatch((p) -> p.getNet() != null && p.getNet().isGNDNet() && p.isOutPin());
             if (!isStaticSource) {
                 design.removeSiteInst(si);
+            }
+        }
+
+        removeInlineFlopConstraints(design);
+    }
+
+    /**
+     * Removes XDC constraints that reference inline flop nets which may no longer
+     * exist after flattening and uniqueification.
+     */
+    public static void removeInlineFlopConstraints(Design design) {
+        for (ConstraintGroup cg : ConstraintGroup.values()) {
+            List<String> constraints = design.getXDCConstraints(cg);
+            if (constraints.isEmpty()) continue;
+            List<String> filtered = new ArrayList<>();
+            int removed = 0;
+            for (String line : constraints) {
+                if (line.contains(INLINE_SUFFIX)) {
+                    removed++;
+                } else {
+                    filtered.add(line);
+                }
+            }
+            if (removed > 0) {
+                design.setXDCConstraints(filtered, cg);
             }
         }
     }

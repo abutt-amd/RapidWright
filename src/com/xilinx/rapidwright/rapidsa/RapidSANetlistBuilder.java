@@ -34,11 +34,12 @@ import com.xilinx.rapidwright.edif.EDIFPort;
 import com.xilinx.rapidwright.edif.EDIFTools;
 import com.xilinx.rapidwright.rapidsa.components.DrainTile;
 import com.xilinx.rapidwright.rapidsa.components.GEMMTile;
-import com.xilinx.rapidwright.rapidsa.components.MM2SChannel;
+import com.xilinx.rapidwright.rapidsa.components.MM2SNOCChannel;
 import com.xilinx.rapidwright.rapidsa.components.WeightDCUTile;
 import com.xilinx.rapidwright.rapidsa.components.RapidComponent;
 import com.xilinx.rapidwright.rapidsa.components.SAControlFSM;
 import com.xilinx.rapidwright.rapidsa.components.InputDCUTile;
+import com.xilinx.rapidwright.rapidsa.components.S2MMNOCChannel;
 
 import java.io.File;
 import java.util.Map;
@@ -99,17 +100,34 @@ public class RapidSANetlistBuilder {
     private static final String DRAIN_S_TVALID   = "s_axis_upstream_tvalid";
     private static final String DRAIN_S_TREADY   = "s_axis_upstream_tready";
 
-    // MM2S channel ports
-    private static final String MM2S_M_DATA         = "m_data_a";
-    private static final String MM2S_M_TAG          = "m_tag_a";
-    private static final String MM2S_M_VALID        = "m_valid_a";
-    private static final String MM2S_M_READY        = "m_ready_a";
-    private static final String MM2S_START           = "start_mm2s_a";
-    private static final String MM2S_SRC_ADDR        = "src_addr_mm2s_a";
-    private static final String MM2S_TRANSFER_LEN    = "transfer_length_mm2s_a";
-    private static final String MM2S_DONE            = "done_mm2s_a";
-    private static final String MM2S_BUSY            = "busy_mm2s_a";
-    private static final String MM2S_ERROR           = "error_mm2s_a";
+    // MM2S NOC channel ports
+    private static final String MM2S_M_DATA_A       = "m_data_a";
+    private static final String MM2S_M_TAG_A        = "m_tag_a";
+    private static final String MM2S_M_VALID_A      = "m_valid_a";
+    private static final String MM2S_M_READY_A      = "m_ready_a";
+    private static final String MM2S_M_DATA_B       = "m_data_b";
+    private static final String MM2S_M_TAG_B        = "m_tag_b";
+    private static final String MM2S_M_VALID_B      = "m_valid_b";
+    private static final String MM2S_M_READY_B      = "m_ready_b";
+    private static final String MM2S_START           = "start";
+    private static final String MM2S_SRC_ADDR_A     = "src_addr_a";
+    private static final String MM2S_TRANSFER_LEN_A = "transfer_length_a";
+    private static final String MM2S_SRC_ADDR_B     = "src_addr_b";
+    private static final String MM2S_TRANSFER_LEN_B = "transfer_length_b";
+    private static final String MM2S_DONE            = "done";
+    private static final String MM2S_BUSY            = "busy";
+    private static final String MM2S_ERROR           = "error";
+
+    // S2MM channel ports
+    private static final String S2MM_S_DATA        = "s_data";
+    private static final String S2MM_S_VALID       = "s_valid";
+    private static final String S2MM_S_READY       = "s_ready";
+    private static final String S2MM_START         = "start";
+    private static final String S2MM_DST_ADDR      = "dst_addr";
+    private static final String S2MM_TRANSFER_LEN  = "transfer_length";
+    private static final String S2MM_DONE          = "done";
+    private static final String S2MM_BUSY          = "busy";
+    private static final String S2MM_ERROR         = "error";
 
     // FSM ports
     private static final String FSM_START          = "start";
@@ -134,7 +152,7 @@ public class RapidSANetlistBuilder {
         RapidComponent weightDcuComponent = new WeightDCUTile(nCols);
         RapidComponent inputDcuComponent = new InputDCUTile(nRows);
         RapidComponent fsmComponent = new SAControlFSM();
-        RapidComponent mm2sComponent = new MM2SChannel(0, "");
+        RapidComponent mm2sComponent = new MM2SNOCChannel();
         if (nRows <= 0 || nCols <= 0) {
             throw new IllegalArgumentException(
                     "Array dimensions must be positive: nRows=" + nRows + ", nCols=" + nCols);
@@ -197,6 +215,14 @@ public class RapidSANetlistBuilder {
         netlist.migrateCellAndSubCells(drainCell, true);
         drainCell.makePrimitive();
 
+        // Create S2MM NOC channel component
+        RapidComponent s2mmComponent = new S2MMNOCChannel();
+        EDIFCell s2mmCell = loadComponentCell(precompileDir, s2mmComponent);
+        String s2mmClk = s2mmComponent.getClkName();
+        String s2mmRst = s2mmComponent.getResetName();
+        netlist.migrateCellAndSubCells(s2mmCell, true);
+        s2mmCell.makePrimitive();
+
         int dcuDoutWidth = getPortWidth(weightDcuCell, DCU_DOUT + "[0]");
         if (dcuDoutWidth != dataBits) {
             throw new RuntimeException(
@@ -219,12 +245,13 @@ public class RapidSANetlistBuilder {
 
         EDIFCellInst fsmInst = createBlackBox(topCell, "sa_fsm", fsmCell);
 
-        EDIFCellInst mm2sAInst = createBlackBox(topCell, "mm2s_a", mm2sCell);
-        EDIFCellInst mm2sBInst = createBlackBox(topCell, "mm2s_b", mm2sCell);
+        EDIFCellInst mm2sInst = createBlackBox(topCell, "mm2s", mm2sCell);
 
         EDIFCellInst[] drainInsts = new EDIFCellInst[nCols];
         for (int i = 0; i < nCols; i++)
             drainInsts[i] = createBlackBox(topCell, "drain_x" + i, drainCell);
+
+        EDIFCellInst s2mmInst = createBlackBox(topCell, "s2mm", s2mmCell);
 
         // Top-level ports
         EDIFPort topClk = topCell.createPort("clk", EDIFDirection.INPUT, 1);
@@ -232,24 +259,28 @@ public class RapidSANetlistBuilder {
         EDIFPort topStart = topCell.createPort("start", EDIFDirection.INPUT, 1);
         EDIFPort topDone = topCell.createPort("done", EDIFDirection.OUTPUT, 1);
 
-        // MM2S channel A control/status ports (feeds west DCUs)
-        int srcAddrWidth = getPortWidth(mm2sCell, MM2S_SRC_ADDR);
-        int transferLenWidth = getPortWidth(mm2sCell, MM2S_TRANSFER_LEN);
+        // MM2S NOC channel control/status ports
+        int srcAddrWidth = getPortWidth(mm2sCell, MM2S_SRC_ADDR_A);
+        int transferLenWidth = getPortWidth(mm2sCell, MM2S_TRANSFER_LEN_A);
 
-        EDIFPort topStartA = topCell.createPort("start_mm2s_a", EDIFDirection.INPUT, 1);
-        EDIFPort topSrcAddrA = createBusPort(topCell, "src_addr_mm2s_a", EDIFDirection.INPUT, srcAddrWidth);
-        EDIFPort topTransferLenA = createBusPort(topCell, "transfer_length_mm2s_a", EDIFDirection.INPUT, transferLenWidth);
-        EDIFPort topDoneA = topCell.createPort("done_mm2s_a", EDIFDirection.OUTPUT, 1);
-        EDIFPort topBusyA = topCell.createPort("busy_mm2s_a", EDIFDirection.OUTPUT, 1);
-        EDIFPort topErrorA = topCell.createPort("error_mm2s_a", EDIFDirection.OUTPUT, 1);
+        EDIFPort topStartMM2S = topCell.createPort("start_mm2s", EDIFDirection.INPUT, 1);
+        EDIFPort topSrcAddrA = createBusPort(topCell, "src_addr_a", EDIFDirection.INPUT, srcAddrWidth);
+        EDIFPort topTransferLenA = createBusPort(topCell, "transfer_length_a", EDIFDirection.INPUT, transferLenWidth);
+        EDIFPort topSrcAddrB = createBusPort(topCell, "src_addr_b", EDIFDirection.INPUT, srcAddrWidth);
+        EDIFPort topTransferLenB = createBusPort(topCell, "transfer_length_b", EDIFDirection.INPUT, transferLenWidth);
+        EDIFPort topDoneMM2S = topCell.createPort("done_mm2s", EDIFDirection.OUTPUT, 1);
+        EDIFPort topBusyMM2S = topCell.createPort("busy_mm2s", EDIFDirection.OUTPUT, 1);
+        EDIFPort topErrorMM2S = topCell.createPort("error_mm2s", EDIFDirection.OUTPUT, 1);
 
-        // MM2S channel B control/status ports (feeds north DCUs)
-        EDIFPort topStartB = topCell.createPort("start_mm2s_b", EDIFDirection.INPUT, 1);
-        EDIFPort topSrcAddrB = createBusPort(topCell, "src_addr_mm2s_b", EDIFDirection.INPUT, srcAddrWidth);
-        EDIFPort topTransferLenB = createBusPort(topCell, "transfer_length_mm2s_b", EDIFDirection.INPUT, transferLenWidth);
-        EDIFPort topDoneB = topCell.createPort("done_mm2s_b", EDIFDirection.OUTPUT, 1);
-        EDIFPort topBusyB = topCell.createPort("busy_mm2s_b", EDIFDirection.OUTPUT, 1);
-        EDIFPort topErrorB = topCell.createPort("error_mm2s_b", EDIFDirection.OUTPUT, 1);
+        // S2MM channel control/status ports (drain -> DDR)
+        int dstAddrWidth = getPortWidth(s2mmCell, S2MM_DST_ADDR);
+        int s2mmTransferLenWidth = getPortWidth(s2mmCell, S2MM_TRANSFER_LEN);
+        EDIFPort topStartS2mm = topCell.createPort("start_s2mm", EDIFDirection.INPUT, 1);
+        EDIFPort topDstAddr = createBusPort(topCell, "dst_addr_s2mm", EDIFDirection.INPUT, dstAddrWidth);
+        EDIFPort topS2mmTransferLen = createBusPort(topCell, "transfer_length_s2mm", EDIFDirection.INPUT, s2mmTransferLenWidth);
+        EDIFPort topDoneS2mm = topCell.createPort("done_s2mm", EDIFDirection.OUTPUT, 1);
+        EDIFPort topBusyS2mm = topCell.createPort("busy_s2mm", EDIFDirection.OUTPUT, 1);
+        EDIFPort topErrorS2mm = topCell.createPort("error_s2mm", EDIFDirection.OUTPUT, 1);
 
         // Clock: fans out to all instances
         EDIFNet clkNet = topCell.createNet("clk");
@@ -264,8 +295,8 @@ public class RapidSANetlistBuilder {
             clkNet.createPortInst(inputDcuClk, inputDcuInsts[i]);
         for (int i = 0; i < nCols; i++)
             clkNet.createPortInst(drainClk, drainInsts[i]);
-        clkNet.createPortInst(mm2sClk, mm2sAInst);
-        clkNet.createPortInst(mm2sClk, mm2sBInst);
+        clkNet.createPortInst(mm2sClk, mm2sInst);
+        clkNet.createPortInst(s2mmClk, s2mmInst);
 
         // rst_n: fans out to all DCU instances
         EDIFNet rstNNet = topCell.createNet("rst_n");
@@ -283,8 +314,10 @@ public class RapidSANetlistBuilder {
                 rstNNet.createPortInst(drainRst, drainInsts[i]);
         }
         if (mm2sRst != null) {
-            rstNNet.createPortInst(mm2sRst, mm2sAInst);
-            rstNNet.createPortInst(mm2sRst, mm2sBInst);
+            rstNNet.createPortInst(mm2sRst, mm2sInst);
+        }
+        if (s2mmRst != null) {
+            rstNNet.createPortInst(s2mmRst, s2mmInst);
         }
 
         // FSM control connections
@@ -305,21 +338,23 @@ public class RapidSANetlistBuilder {
             connectSingleBit(topCell, "reset", topReset, fsmInst, fsmRst);
         }
 
-        // MM2S channel A control/status connections
-        connectSingleBit(topCell, "start_mm2s_a", topStartA, mm2sAInst, MM2S_START);
-        connectBusPortToTopLevel(topCell, "src_addr_mm2s_a", topSrcAddrA, mm2sAInst, MM2S_SRC_ADDR, srcAddrWidth);
-        connectBusPortToTopLevel(topCell, "transfer_length_mm2s_a", topTransferLenA, mm2sAInst, MM2S_TRANSFER_LEN, transferLenWidth);
-        connectSingleBit(topCell, "done_mm2s_a", topDoneA, mm2sAInst, MM2S_DONE);
-        connectSingleBit(topCell, "busy_mm2s_a", topBusyA, mm2sAInst, MM2S_BUSY);
-        connectSingleBit(topCell, "error_mm2s_a", topErrorA, mm2sAInst, MM2S_ERROR);
+        // MM2S NOC channel control/status connections
+        connectSingleBit(topCell, "start_mm2s", topStartMM2S, mm2sInst, MM2S_START);
+        connectBusPortToTopLevel(topCell, "src_addr_a", topSrcAddrA, mm2sInst, MM2S_SRC_ADDR_A, srcAddrWidth);
+        connectBusPortToTopLevel(topCell, "transfer_length_a", topTransferLenA, mm2sInst, MM2S_TRANSFER_LEN_A, transferLenWidth);
+        connectBusPortToTopLevel(topCell, "src_addr_b", topSrcAddrB, mm2sInst, MM2S_SRC_ADDR_B, srcAddrWidth);
+        connectBusPortToTopLevel(topCell, "transfer_length_b", topTransferLenB, mm2sInst, MM2S_TRANSFER_LEN_B, transferLenWidth);
+        connectSingleBit(topCell, "done_mm2s", topDoneMM2S, mm2sInst, MM2S_DONE);
+        connectSingleBit(topCell, "busy_mm2s", topBusyMM2S, mm2sInst, MM2S_BUSY);
+        connectSingleBit(topCell, "error_mm2s", topErrorMM2S, mm2sInst, MM2S_ERROR);
 
-        // MM2S channel B control/status connections
-        connectSingleBit(topCell, "start_mm2s_b", topStartB, mm2sBInst, MM2S_START);
-        connectBusPortToTopLevel(topCell, "src_addr_mm2s_b", topSrcAddrB, mm2sBInst, MM2S_SRC_ADDR, srcAddrWidth);
-        connectBusPortToTopLevel(topCell, "transfer_length_mm2s_b", topTransferLenB, mm2sBInst, MM2S_TRANSFER_LEN, transferLenWidth);
-        connectSingleBit(topCell, "done_mm2s_b", topDoneB, mm2sBInst, MM2S_DONE);
-        connectSingleBit(topCell, "busy_mm2s_b", topBusyB, mm2sBInst, MM2S_BUSY);
-        connectSingleBit(topCell, "error_mm2s_b", topErrorB, mm2sBInst, MM2S_ERROR);
+        // S2MM channel control/status connections
+        connectSingleBit(topCell, "start_s2mm", topStartS2mm, s2mmInst, S2MM_START);
+        connectBusPortToTopLevel(topCell, "dst_addr_s2mm", topDstAddr, s2mmInst, S2MM_DST_ADDR, dstAddrWidth);
+        connectBusPortToTopLevel(topCell, "transfer_length_s2mm", topS2mmTransferLen, s2mmInst, S2MM_TRANSFER_LEN, s2mmTransferLenWidth);
+        connectSingleBit(topCell, "done_s2mm", topDoneS2mm, s2mmInst, S2MM_DONE);
+        connectSingleBit(topCell, "busy_s2mm", topBusyS2mm, s2mmInst, S2MM_BUSY);
+        connectSingleBit(topCell, "error_s2mm", topErrorS2mm, s2mmInst, S2MM_ERROR);
 
         // FSM sa_accum_shift -> all GEMM tiles
         EDIFNet accumShiftNet = topCell.createNet("sa_accum_shift");
@@ -348,13 +383,15 @@ public class RapidSANetlistBuilder {
             rdEnChain.createPortInst(DCU_RD_EN, inputDcuInsts[i + 1]);
         }
 
-        // WeightDCU daisy chain (B matrix) — MM2S B feeds DCU[0], inter-DCU chain, last DCU output unconnected
-        connectDaisyChainInternal(topCell, weightDcuInsts,
-                mm2sBInst, "b", dataWidth, tagWidth);
+        // WeightDCU daisy chain (B matrix) — MM2S port B feeds DCU[0], inter-DCU chain, last DCU output unconnected
+        connectDaisyChainInternal(topCell, weightDcuInsts, mm2sInst,
+                MM2S_M_DATA_B, MM2S_M_TAG_B, MM2S_M_VALID_B, MM2S_M_READY_B,
+                "b", dataWidth, tagWidth);
 
-        // InputDCU daisy chain (A matrix) — MM2S A feeds DCU[0], inter-DCU chain, last DCU output unconnected
-        connectDaisyChainInternal(topCell, inputDcuInsts,
-                mm2sAInst, "a", dataWidth, tagWidth);
+        // InputDCU daisy chain (A matrix) — MM2S port A feeds DCU[0], inter-DCU chain, last DCU output unconnected
+        connectDaisyChainInternal(topCell, inputDcuInsts, mm2sInst,
+                MM2S_M_DATA_A, MM2S_M_TAG_A, MM2S_M_VALID_A, MM2S_M_READY_A,
+                "a", dataWidth, tagWidth);
 
         // WeightDCU -> top row GEMM tiles
         for (int col = 0; col < nCols; col++) {
@@ -453,13 +490,13 @@ public class RapidSANetlistBuilder {
                     drainInsts[i], DRAIN_S_TREADY, drainInsts[i + 1], DRAIN_M_TREADY);
         }
 
-        // Top-level drain output ports (drain_x0's downstream)
-        EDIFPort topDrainTdata = createBusPort(topCell, "drain_tdata", EDIFDirection.OUTPUT, accumBits);
-        EDIFPort topDrainTvalid = topCell.createPort("drain_tvalid", EDIFDirection.OUTPUT, 1);
-        EDIFPort topDrainTready = topCell.createPort("drain_tready", EDIFDirection.INPUT, 1);
-        connectBusPortToTopLevel(topCell, "drain_out_tdata", topDrainTdata, drainInsts[0], DRAIN_M_TDATA, accumBits);
-        connectSingleBit(topCell, "drain_out_tvalid", topDrainTvalid, drainInsts[0], DRAIN_M_TVALID);
-        connectSingleBit(topCell, "drain_out_tready", topDrainTready, drainInsts[0], DRAIN_M_TREADY);
+        // Drain output -> S2MM channel input
+        connectBusPorts(topCell, "drain_to_s2mm_data",
+                drainInsts[0], DRAIN_M_TDATA, s2mmInst, S2MM_S_DATA, accumBits);
+        connectSingleBit(topCell, "drain_to_s2mm_valid",
+                drainInsts[0], DRAIN_M_TVALID, s2mmInst, S2MM_S_VALID);
+        connectSingleBit(topCell, "drain_to_s2mm_ready",
+                s2mmInst, S2MM_S_READY, drainInsts[0], DRAIN_M_TREADY);
 
         // Tie rightmost drain tile's upstream inputs to GND (no external upstream)
         for (int i = 0; i < accumBits; i++) {
@@ -557,19 +594,21 @@ public class RapidSANetlistBuilder {
      */
     private static void connectDaisyChainInternal(EDIFCell topCell, EDIFCellInst[] dcuInsts,
                                                   EDIFCellInst mm2sInst,
+                                                  String mm2sDataPort, String mm2sTagPort,
+                                                  String mm2sValidPort, String mm2sReadyPort,
                                                   String prefix, int dataWidth, int tagWidth) {
         int n = dcuInsts.length;
         EDIFNet gndNet = EDIFTools.getStaticNet(NetType.GND, topCell, topCell.getLibrary().getNetlist());
 
         // MM2S outputs -> DCU[0] inputs
         connectBusPorts(topCell, prefix + "_mm2s_to_dcu0_data",
-                mm2sInst, MM2S_M_DATA, dcuInsts[0], DCU_S_DATA, dataWidth);
+                mm2sInst, mm2sDataPort, dcuInsts[0], DCU_S_DATA, dataWidth);
         connectBusPorts(topCell, prefix + "_mm2s_to_dcu0_tag",
-                mm2sInst, MM2S_M_TAG, dcuInsts[0], DCU_S_TAG, tagWidth);
+                mm2sInst, mm2sTagPort, dcuInsts[0], DCU_S_TAG, tagWidth);
         connectSingleBit(topCell, prefix + "_mm2s_to_dcu0_valid",
-                mm2sInst, MM2S_M_VALID, dcuInsts[0], DCU_S_VALID);
+                mm2sInst, mm2sValidPort, dcuInsts[0], DCU_S_VALID);
         connectSingleBit(topCell, prefix + "_mm2s_to_dcu0_ready",
-                dcuInsts[0], DCU_S_READY, mm2sInst, MM2S_M_READY);
+                dcuInsts[0], DCU_S_READY, mm2sInst, mm2sReadyPort);
 
         // Inter-DCU chain
         for (int i = 0; i < n - 1; i++) {

@@ -32,7 +32,6 @@ import com.xilinx.rapidwright.design.RelocatableTileRectangle;
 import com.xilinx.rapidwright.design.SiteInst;
 import com.xilinx.rapidwright.design.tools.ArrayBuilder;
 import com.xilinx.rapidwright.design.tools.ArrayBuilderConfig;
-import com.xilinx.rapidwright.design.tools.FlopTreeTools;
 import com.xilinx.rapidwright.design.tools.RegisterInitTools;
 import com.xilinx.rapidwright.device.Part;
 import com.xilinx.rapidwright.device.PartNameTools;
@@ -44,11 +43,11 @@ import com.xilinx.rapidwright.edif.EDIFNetlist;
 import com.xilinx.rapidwright.edif.EDIFTools;
 import com.xilinx.rapidwright.rapidsa.components.DrainTile;
 import com.xilinx.rapidwright.rapidsa.components.GEMMTile;
-import com.xilinx.rapidwright.rapidsa.components.MM2SChannel;
-import com.xilinx.rapidwright.rapidsa.components.WeightDCUTile;
-import com.xilinx.rapidwright.rapidsa.components.RapidComponent;
-import com.xilinx.rapidwright.rapidsa.components.SAControlFSM;
 import com.xilinx.rapidwright.rapidsa.components.InputDCUTile;
+import com.xilinx.rapidwright.rapidsa.components.MM2SNOCChannel;
+import com.xilinx.rapidwright.rapidsa.components.RapidComponent;
+import com.xilinx.rapidwright.rapidsa.components.S2MMNOCChannel;
+import com.xilinx.rapidwright.rapidsa.components.WeightDCUTile;
 import com.xilinx.rapidwright.util.Pair;
 import joptsimple.OptionParser;
 
@@ -82,12 +81,13 @@ public class RapidSA {
         }
 
 //        Design d = Design.readCheckpoint("/group/zircon2/abutt/RapidSA/MM2SNOCChannel/PerformanceExplorer/Explore_Explore_0.25_pblock0_SLICE_X322Y868-/routed.dcp");
+//        d.getNOCDesign().clearSolution();
 //        d.writeCheckpoint("/group/zircon2/abutt/RapidSA/MM2SNOCChannel/pnr.dcp");
 //        if (true)
 //        return;
 
         if (options.has("precompile")) {
-            RapidSAPrecompile.precompileRapidSAComponents("RapidSA", part, 2.0);
+            RapidSAPrecompile.precompileRapidSAComponents("RapidSA", part, 1.667);
             return;
         }
 
@@ -107,6 +107,8 @@ public class RapidSA {
         config.setOutOfContext(false);
         config.setRouteClock(false);
         config.setFlipPlacementHorizontally(true);
+        config.setRowOffset(5);
+        config.setColumnOffset(1);
 
         // Create array builder with config
         ArrayBuilder ab = new ArrayBuilder(config);
@@ -122,41 +124,37 @@ public class RapidSA {
         Module inputDcuModule = loadRelocatableModule("RapidSA", new InputDCUTile(8), ab.getArray());
         placeInputDCUTiles(ab, 8, inputDcuModule);
 
-        // Place SA FSM near top-left of the design
-        Module fsmModule = loadRelocatableModule("RapidSA", new SAControlFSM(), ab.getArray());
-        placeFSM(ab, fsmModule);
-
         // Place DrainTiles below the array
         int accumCount = 4 * 4; // nCols * nRows for GEMM tile accumulator count
         Module drainModule = loadRelocatableModule("RapidSA", new DrainTile(accumCount, 8), ab.getArray());
         placeDrainTiles(ab, 8, drainModule, accumCount);
 
-        // Place MM2S channels near the top of the array
-        Module mm2sModule = loadRelocatableModule("RapidSA", new MM2SChannel(0, ""), ab.getArray());
-        placeMM2SChannels(ab, mm2sModule);
+        // Place MM2S NOC channel at the top-right of the array
+        Module mm2sModule = loadRelocatableModule("RapidSA", new MM2SNOCChannel(), ab.getArray());
+        placeMM2SNOCChannel(ab, mm2sModule);
+
+        // Place S2MM channel at the top-right of the array
+        Module s2mmModule = loadRelocatableModule("RapidSA", new S2MMNOCChannel(), ab.getArray());
+        placeS2MMChannel(ab, s2mmModule);
 
         Design arrayDesign = ab.getArray();
 
         // Update MM2S registers before flattening (deep hierarchy won't survive flatten)
-        MM2SChannel.setTagSource(arrayDesign, "mm2s_a", 0);  // ROW
-        MM2SChannel.setTagSource(arrayDesign, "mm2s_b", 1);  // COL
-        MM2SChannel.setMatrixHeight(arrayDesign, "mm2s_a", 8);
-        MM2SChannel.setMatrixWidth(arrayDesign, "mm2s_a", 8);
-        MM2SChannel.setMatrixHeight(arrayDesign, "mm2s_b", 8);
-        MM2SChannel.setMatrixWidth(arrayDesign, "mm2s_b", 8);
+        MM2SNOCChannel.setMatrixHeight(arrayDesign, "mm2s", 8);
+        MM2SNOCChannel.setMatrixWidth(arrayDesign, "mm2s", 8);
 
         arrayDesign.flattenDesign();
         EDIFTools.uniqueifyNetlist(arrayDesign);
         int flopTreeDepth = 6;
-        FlopTreeTools.insertFlopTreeForNet(arrayDesign, "sa_accum_shift", "clk", flopTreeDepth, 3);
-        FlopTreeTools.insertFlopTreeForNet(arrayDesign, "output_wr_en", "clk", flopTreeDepth, 3);
+//        FlopTreeTools.insertFlopTreeForNet(arrayDesign, "sa_accum_shift", "clk", flopTreeDepth, 3);
+//        FlopTreeTools.insertFlopTreeForNet(arrayDesign, "output_wr_en", "clk", flopTreeDepth, 3);
 
         // Update FSM registers
-        SAControlFSM.setSAWidth(arrayDesign, "sa_fsm", 8);
-        SAControlFSM.setSAHeight(arrayDesign, "sa_fsm", 8);
-        SAControlFSM.setKDim(arrayDesign, "sa_fsm", 8);
-        SAControlFSM.setAccumShiftPipelineLatency(arrayDesign, "sa_fsm", flopTreeDepth);
-        SAControlFSM.setOutputWrPipelineLatency(arrayDesign, "sa_fsm", flopTreeDepth);
+//        SAControlFSM.setSAWidth(arrayDesign, "sa_fsm", 8);
+//        SAControlFSM.setSAHeight(arrayDesign, "sa_fsm", 8);
+//        SAControlFSM.setKDim(arrayDesign, "sa_fsm", 8);
+//        SAControlFSM.setAccumShiftPipelineLatency(arrayDesign, "sa_fsm", flopTreeDepth);
+//        SAControlFSM.setOutputWrPipelineLatency(arrayDesign, "sa_fsm", flopTreeDepth);
 
         // Add clock constraint
         arrayDesign.addXDCConstraint("create_clock -period 2.0 -name clk [get_ports clk]");
@@ -443,13 +441,10 @@ public class RapidSA {
     }
 
     /**
-     * Places two MM2S channel instances (mm2s_b and mm2s_a) near the top
-     * of the array. mm2s_b is placed first (feeds weight DCU chain),
-     * mm2s_a second (feeds input DCU chain).
+     * Places the MM2S NOC channel at the top-right of the array.
      */
-    private static void placeMM2SChannels(ArrayBuilder ab, Module mm2sModule) {
+    private static void placeMM2SNOCChannel(ArrayBuilder ab, Module mm2sModule) {
         Design arrayDesign = ab.getArray();
-        Map<Pair<Integer, Integer>, Site> centroidMap = ab.getLogicalToCentroidMap();
         RelocatableTileRectangle moduleBoundingBox = mm2sModule.getBoundingBox();
 
         // Collect all existing placed bounding boxes
@@ -468,71 +463,129 @@ public class RapidSA {
             occupiedTiles.add(si.getTile());
         }
 
-        // Target: near the top of the array
-        int targetCol = 0;
-        for (SiteInst si : arrayDesign.getSiteInsts()) {
-            targetCol += si.getTile().getColumn();
-        }
-        targetCol /= Math.max(1, arrayDesign.getSiteInsts().size());
-
-        // Target row: above the array (minimum row of all placed sites)
+        // Target: top-right corner of the array
         int targetRow = Integer.MAX_VALUE;
+        int targetCol = Integer.MIN_VALUE;
         for (SiteInst si : arrayDesign.getSiteInsts()) {
             targetRow = Math.min(targetRow, si.getTile().getRow());
+            targetCol = Math.max(targetCol, si.getTile().getColumn());
         }
 
-        String[] instNames = {"mm2s_b", "mm2s_a"};  // b first (top), a second (below)
-        for (String instName : instNames) {
-            ModuleInst mi = arrayDesign.createModuleInst(instName, mm2sModule);
-            Site bestAnchor = null;
-            int bestDist = Integer.MAX_VALUE;
+        ModuleInst mi = arrayDesign.createModuleInst("mm2s", mm2sModule);
+        Site bestAnchor = null;
+        int bestDist = Integer.MAX_VALUE;
 
-            for (Site anchor : mm2sModule.getAllValidPlacements()) {
-                RelocatableTileRectangle candidateBB = moduleBoundingBox
-                        .getCorresponding(anchor.getTile(), mm2sModule.getAnchor().getTile());
+        for (Site anchor : mm2sModule.getAllValidPlacements()) {
+            RelocatableTileRectangle candidateBB = moduleBoundingBox
+                    .getCorresponding(anchor.getTile(), mm2sModule.getAnchor().getTile());
 
-                // No overlap with existing bounding boxes
-                boolean overlaps = false;
-                for (RelocatableTileRectangle existing : existingBBs) {
-                    if (existing.overlaps(candidateBB)) { overlaps = true; break; }
-                }
-                if (overlaps) continue;
-
-                // No site-level conflicts
-                boolean siteConflict = false;
-                for (SiteInst modSi : mm2sModule.getSiteInsts()) {
-                    Site newSite = mm2sModule.getCorrespondingSite(modSi, anchor);
-                    if (newSite != null && occupiedTiles.contains(newSite.getTile())) {
-                        siteConflict = true; break;
-                    }
-                }
-                if (siteConflict) continue;
-
-                int dist = Math.abs(anchor.getTile().getColumn() - targetCol)
-                         + Math.abs(anchor.getTile().getRow() - targetRow);
-                if (dist < bestDist) {
-                    bestDist = dist;
-                    bestAnchor = anchor;
-                }
+            // No overlap with existing bounding boxes
+            boolean overlaps = false;
+            for (RelocatableTileRectangle existing : existingBBs) {
+                if (existing.overlaps(candidateBB)) { overlaps = true; break; }
             }
+            if (overlaps) continue;
 
-            if (bestAnchor == null) {
-                throw new RuntimeException("Could not find valid placement for " + instName);
-            }
-            if (!mi.place(bestAnchor, false, false)) {
-                throw new RuntimeException("Failed to place " + instName + " at " + bestAnchor);
-            }
-
-            // Track this placement for the next iteration
-            existingBBs.add(moduleBoundingBox
-                    .getCorresponding(bestAnchor.getTile(), mm2sModule.getAnchor().getTile()));
+            // No site-level conflicts
+            boolean siteConflict = false;
             for (SiteInst modSi : mm2sModule.getSiteInsts()) {
-                Site newSite = mm2sModule.getCorrespondingSite(modSi, bestAnchor);
-                if (newSite != null) occupiedTiles.add(newSite.getTile());
+                Site newSite = mm2sModule.getCorrespondingSite(modSi, anchor);
+                if (newSite != null && occupiedTiles.contains(newSite.getTile())) {
+                    siteConflict = true; break;
+                }
             }
+            if (siteConflict) continue;
 
-            System.out.println("  ** PLACED MM2S: " + instName + " at " + bestAnchor);
+            int dist = Math.abs(anchor.getTile().getColumn() - targetCol)
+                     + Math.abs(anchor.getTile().getRow() - targetRow);
+            if (dist < bestDist) {
+                bestDist = dist;
+                bestAnchor = anchor;
+            }
         }
+
+        if (bestAnchor == null) {
+            throw new RuntimeException("Could not find valid placement for mm2s");
+        }
+        if (!mi.place(bestAnchor, false, false)) {
+            throw new RuntimeException("Failed to place mm2s at " + bestAnchor);
+        }
+
+        System.out.println("  ** PLACED MM2S NOC: mm2s at " + bestAnchor);
+    }
+
+    /**
+     * Places the S2MM channel at the bottom-right side of the array.
+     */
+    private static void placeS2MMChannel(ArrayBuilder ab, Module s2mmModule) {
+        Design arrayDesign = ab.getArray();
+        RelocatableTileRectangle moduleBoundingBox = s2mmModule.getBoundingBox();
+
+        // Collect all existing placed bounding boxes
+        List<RelocatableTileRectangle> existingBBs = new ArrayList<>();
+        for (ModuleInst existingMi : arrayDesign.getModuleInsts()) {
+            if (existingMi.isPlaced()) {
+                Module mod = existingMi.getModule();
+                existingBBs.add(mod.getBoundingBox()
+                        .getCorresponding(existingMi.getPlacement().getTile(), mod.getAnchor().getTile()));
+            }
+        }
+
+        // Build occupied tiles set
+        Set<Tile> occupiedTiles = new HashSet<>();
+        for (SiteInst si : arrayDesign.getSiteInsts()) {
+            occupiedTiles.add(si.getTile());
+        }
+
+        // Target: bottom-right corner of the array
+        int targetRow = Integer.MIN_VALUE;
+        int targetCol = Integer.MIN_VALUE;
+        for (SiteInst si : arrayDesign.getSiteInsts()) {
+            targetRow = Math.max(targetRow, si.getTile().getRow());
+            targetCol = Math.max(targetCol, si.getTile().getColumn());
+        }
+
+        ModuleInst mi = arrayDesign.createModuleInst("s2mm", s2mmModule);
+        Site bestAnchor = null;
+        int bestDist = Integer.MAX_VALUE;
+
+        for (Site anchor : s2mmModule.getAllValidPlacements()) {
+            RelocatableTileRectangle candidateBB = moduleBoundingBox
+                    .getCorresponding(anchor.getTile(), s2mmModule.getAnchor().getTile());
+
+            // No overlap with existing bounding boxes
+            boolean overlaps = false;
+            for (RelocatableTileRectangle existing : existingBBs) {
+                if (existing.overlaps(candidateBB)) { overlaps = true; break; }
+            }
+            if (overlaps) continue;
+
+            // No site-level conflicts
+            boolean siteConflict = false;
+            for (SiteInst modSi : s2mmModule.getSiteInsts()) {
+                Site newSite = s2mmModule.getCorrespondingSite(modSi, anchor);
+                if (newSite != null && occupiedTiles.contains(newSite.getTile())) {
+                    siteConflict = true; break;
+                }
+            }
+            if (siteConflict) continue;
+
+            int dist = Math.abs(anchor.getTile().getColumn() - targetCol)
+                     + Math.abs(anchor.getTile().getRow() - targetRow);
+            if (dist < bestDist) {
+                bestDist = dist;
+                bestAnchor = anchor;
+            }
+        }
+
+        if (bestAnchor == null) {
+            throw new RuntimeException("Could not find valid placement for s2mm");
+        }
+        if (!mi.place(bestAnchor, false, false)) {
+            throw new RuntimeException("Failed to place s2mm at " + bestAnchor);
+        }
+
+        System.out.println("  ** PLACED S2MM: s2mm at " + bestAnchor);
     }
 
     /**
@@ -672,4 +725,5 @@ public class RapidSA {
         // Remove the old black-box cell
         blackBoxCell.getLibrary().removeCell(blackBoxCell);
     }
+
 }

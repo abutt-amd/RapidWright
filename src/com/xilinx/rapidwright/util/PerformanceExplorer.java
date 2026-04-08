@@ -547,6 +547,10 @@ public class PerformanceExplorer {
             System.out.println("Best result found at: " + bestPath);
             Design d = Design.readCheckpoint(bestPath + File.separator + "routed.dcp");
 
+            if (d.getNOCDesign() != null) {
+                d.getNOCDesign().clearSolution();
+            }
+
             if (ensureExternalRoutability()) {
                 InlineFlopTools.removeInlineFlops(d);
                 NetTools.unrouteTopLevelNetsThatLeavePBlock(d, getPBlock(pblockNum));
