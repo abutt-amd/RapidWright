@@ -32,6 +32,7 @@ import com.xilinx.rapidwright.design.RelocatableTileRectangle;
 import com.xilinx.rapidwright.design.SiteInst;
 import com.xilinx.rapidwright.design.tools.ArrayBuilder;
 import com.xilinx.rapidwright.design.tools.ArrayBuilderConfig;
+import com.xilinx.rapidwright.design.tools.FlopTreeTools;
 import com.xilinx.rapidwright.design.tools.RegisterInitTools;
 import com.xilinx.rapidwright.device.Part;
 import com.xilinx.rapidwright.device.PartNameTools;
@@ -39,6 +40,7 @@ import com.xilinx.rapidwright.device.Site;
 import com.xilinx.rapidwright.device.Tile;
 import com.xilinx.rapidwright.edif.EDIFCell;
 import com.xilinx.rapidwright.edif.EDIFCellInst;
+import com.xilinx.rapidwright.edif.EDIFHierPortInst;
 import com.xilinx.rapidwright.edif.EDIFNetlist;
 import com.xilinx.rapidwright.edif.EDIFTools;
 import com.xilinx.rapidwright.rapidsa.components.DrainTile;
@@ -47,6 +49,7 @@ import com.xilinx.rapidwright.rapidsa.components.InputDCUTile;
 import com.xilinx.rapidwright.rapidsa.components.MM2SNOCChannel;
 import com.xilinx.rapidwright.rapidsa.components.RapidComponent;
 import com.xilinx.rapidwright.rapidsa.components.S2MMNOCChannel;
+import com.xilinx.rapidwright.rapidsa.components.SAControlFSM;
 import com.xilinx.rapidwright.rapidsa.components.WeightDCUTile;
 import com.xilinx.rapidwright.util.Pair;
 import joptsimple.OptionParser;
@@ -87,7 +90,7 @@ public class RapidSA {
 //        return;
 
         if (options.has("precompile")) {
-            RapidSAPrecompile.precompileRapidSAComponents("RapidSA", part, 1.667);
+            RapidSAPrecompile.precompileRapidSAComponents("RapidSA", part, 2.0);
             return;
         }
 
@@ -139,22 +142,51 @@ public class RapidSA {
 
         Design arrayDesign = ab.getArray();
 
-        // Update MM2S registers before flattening (deep hierarchy won't survive flatten)
+        // Update registers before flattening (deep hierarchy won't survive flatten)
         MM2SNOCChannel.setMatrixHeight(arrayDesign, "mm2s", 8);
         MM2SNOCChannel.setMatrixWidth(arrayDesign, "mm2s", 8);
 
+        // Update FSM registers (FSM is inside MM2S BD)
+        String fsmPrefix = "mm2s/mm2s_channel_i/sa_fsm_0/inst/inst";
+        SAControlFSM.setSAWidth(arrayDesign, fsmPrefix, 8);
+        SAControlFSM.setSAHeight(arrayDesign, fsmPrefix, 8);
+        SAControlFSM.setKDim(arrayDesign, fsmPrefix, 8);
+        int flopTreeDepth = 6;
+        SAControlFSM.setAccumShiftPipelineLatency(arrayDesign, fsmPrefix, flopTreeDepth);
+        SAControlFSM.setOutputWrPipelineLatency(arrayDesign, fsmPrefix, flopTreeDepth);
+        int unitsPerTile = 4;
+        int dcuChainLatency = 3 * Math.max(8 / unitsPerTile, 8 / unitsPerTile) + 4;
+        SAControlFSM.setDcuChainLatency(arrayDesign, fsmPrefix, dcuChainLatency);
+
         arrayDesign.flattenDesign();
         EDIFTools.uniqueifyNetlist(arrayDesign);
-        int flopTreeDepth = 6;
-//        FlopTreeTools.insertFlopTreeForNet(arrayDesign, "sa_accum_shift", "clk", flopTreeDepth, 3);
-//        FlopTreeTools.insertFlopTreeForNet(arrayDesign, "output_wr_en", "clk", flopTreeDepth, 3);
 
-        // Update FSM registers
-//        SAControlFSM.setSAWidth(arrayDesign, "sa_fsm", 8);
-//        SAControlFSM.setSAHeight(arrayDesign, "sa_fsm", 8);
-//        SAControlFSM.setKDim(arrayDesign, "sa_fsm", 8);
-//        SAControlFSM.setAccumShiftPipelineLatency(arrayDesign, "sa_fsm", flopTreeDepth);
-//        SAControlFSM.setOutputWrPipelineLatency(arrayDesign, "sa_fsm", flopTreeDepth);
+        FlopTreeTools.insertFlopTreeForNet(arrayDesign, "sa_accum_shift", "clk", flopTreeDepth, 3);
+        FlopTreeTools.insertFlopTreeForNet(arrayDesign, "output_wr_en", "clk", flopTreeDepth, 3);
+        Set<SiteInst> chainSiteInsts = new HashSet<>();
+        Net s2mmStartNet = arrayDesign.getNet("s2mm/s2mm_start");
+        // Filter to only remote sinks (in s2mm, not mm2s)
+        List<EDIFHierPortInst> s2mmStartRemoteSinks = new ArrayList<>();
+        for (EDIFHierPortInst p : s2mmStartNet.getLogicalHierNet().getLeafHierPortInsts(false)) {
+            if (p.getFullHierarchicalInstName().startsWith("s2mm/")) {
+                s2mmStartRemoteSinks.add(p);
+            }
+        }
+        FlopTreeTools.insertFlopChain(arrayDesign, s2mmStartNet, "clk", 3,
+                s2mmStartRemoteSinks, chainSiteInsts);
+        Net s2mmDoneNet = arrayDesign.getNet("mm2s/s2mm_done");
+        // Filter to only remote sinks (in mm2s, not s2mm)
+        List<EDIFHierPortInst> s2mmDoneRemoteSinks = new ArrayList<>();
+        for (EDIFHierPortInst p : s2mmDoneNet.getLogicalHierNet().getLeafHierPortInsts(false)) {
+            if (p.getFullHierarchicalInstName().startsWith("mm2s/")) {
+                s2mmDoneRemoteSinks.add(p);
+            }
+        }
+        FlopTreeTools.insertFlopChain(arrayDesign, s2mmDoneNet, "clk", 3,
+                s2mmDoneRemoteSinks, chainSiteInsts);
+        for (SiteInst si : chainSiteInsts) {
+            si.routeSite();
+        }
 
         // Add clock constraint
         arrayDesign.addXDCConstraint("create_clock -period 2.0 -name clk [get_ports clk]");

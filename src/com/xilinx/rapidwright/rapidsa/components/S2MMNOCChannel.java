@@ -37,13 +37,16 @@ import java.util.List;
 import java.util.Map;
 
 /**
- * RapidComponent for an S2MM DMA channel via single NoC NMU.
+ * RapidComponent for an S2MM DMA channel via NoC.
  *
  * Accepts an 8-bit AXI-Stream input (from the drain tile chain) and writes
  * it to DDR through the NoC using the Xilinx AXI DMA IP (S2MM channel).
+ * Controlled via an AXI4 slave (Vitis HLS register convention) connected
+ * through a NoC NSU.
  *
  * Contains: AXI DMA (S2MM only), AXI DMA S2MM control wrapper,
- * AXI NoC (1 slave, 1 INI master).
+ * s2mm_axilite_slave (AXI4), AXI NoC (NMU data path + NSU control path),
+ * AXI register slice, AXIS register slice.
  */
 public class S2MMNOCChannel implements RapidComponent {
 
@@ -66,6 +69,8 @@ public class S2MMNOCChannel implements RapidComponent {
         // Add HDL sources needed for module references in the block design
         lines.add("add_files " + rtlPath + "axi_dma_s2mm_ctrl_wrapper.v");
         lines.add("add_files " + rtlPath + "axi_dma_s2mm_ctrl.sv");
+        lines.add("add_files " + rtlPath + "s2mm_axilite_slave_wrapper.v");
+        lines.add("add_files " + rtlPath + "s2mm_axilite_slave.sv");
         lines.add("set_property source_mgmt_mode All [current_project]");
         lines.add("update_compile_order -fileset sources_1");
 
@@ -80,23 +85,23 @@ public class S2MMNOCChannel implements RapidComponent {
         lines.add("set resetn [create_bd_port -dir I -type rst resetn]");
         lines.add("set_property CONFIG.POLARITY ACTIVE_LOW $resetn");
 
-        // Control
-        lines.add("create_bd_port -dir I start");
-        lines.add("create_bd_port -dir I -from 31 -to 0 dst_addr");
-        lines.add("create_bd_port -dir I -from 22 -to 0 transfer_length");
-        lines.add("create_bd_port -dir O done");
-        lines.add("create_bd_port -dir O busy");
-        lines.add("create_bd_port -dir O error");
-
         // Input AXI-Stream (from drain tile)
         lines.add("create_bd_port -dir I -from 7 -to 0 s_data");
         lines.add("create_bd_port -dir I s_valid");
         lines.add("create_bd_port -dir O s_ready");
 
+        // Interrupt output
+        lines.add("create_bd_port -dir O interrupt");
+
+        // FSM control (from MM2S/FSM, crosses the array)
+        lines.add("create_bd_port -dir I s2mm_start");
+        lines.add("create_bd_port -dir O s2mm_done");
+
         // =====================================================================
         // IP / module instances
         // =====================================================================
         lines.add("create_bd_cell -type module -reference axi_dma_s2mm_ctrl_wrapper axi_dma_s2mm_ctrl_wr_0");
+        lines.add("create_bd_cell -type module -reference s2mm_axilite_slave_wrapper s2mm_axilite_slave_wr_0");
 
         lines.add("set axi_dma_0 [create_bd_cell -type ip -vlnv xilinx.com:ip:axi_dma:7.1 axi_dma_0]");
         lines.add("set_property -dict [list "
@@ -108,38 +113,65 @@ public class S2MMNOCChannel implements RapidComponent {
                 + "CONFIG.c_s2mm_burst_size {2}"
                 + "] $axi_dma_0");
 
-        // NoC NMU — 1 slave AXI, 1 INI master, no memory controller
+        // NoC — 1 NMU (data to DDR) + 1 NSU (control from host)
         lines.add("set axi_noc_0 [create_bd_cell -type ip -vlnv xilinx.com:ip:axi_noc:1.1 axi_noc_0]");
         lines.add("set_property -dict [list "
                 + "CONFIG.NUM_SI {1} "
-                + "CONFIG.NUM_MI {0} "
+                + "CONFIG.NUM_MI {1} "
                 + "CONFIG.NUM_MC {0} "
                 + "CONFIG.NUM_CLKS {1} "
-                + "CONFIG.NUM_NMI {1}"
+                + "CONFIG.NUM_NMI {1} "
+                + "CONFIG.NUM_NSI {1}"
                 + "] $axi_noc_0");
-        lines.add("set_property -dict [list CONFIG.CONNECTIONS {M00_INI {}}] [get_bd_intf_pins /axi_noc_0/S00_AXI]");
+        lines.add("set_property -dict [list CONFIG.CONNECTIONS {M00_INI {read_bw {500} write_bw {500}}}] [get_bd_intf_pins /axi_noc_0/S00_AXI]");
+        lines.add("set_property -dict [list CONFIG.CONNECTIONS {M00_AXI {read_bw {500} write_bw {500}}}] [get_bd_intf_pins /axi_noc_0/S00_INI]");
 
-        // AXI Register Slice between DMA and NoC
+        // AXI Register Slice between DMA and NoC NMU
         lines.add("set axi_reg_slice_0 [create_bd_cell -type ip -vlnv xilinx.com:ip:axi_register_slice:2.1 axi_reg_slice_0]");
 
-        // AXI-Stream Register Slice on input stream
+        // AXI-Stream Register Slice on input stream (with TLAST enabled)
         lines.add("set axis_reg_slice_0 [create_bd_cell -type ip -vlnv xilinx.com:ip:axis_register_slice:1.1 axis_reg_slice_0]");
         lines.add("set_property -dict [list "
-                + "CONFIG.TDATA_NUM_BYTES {1}"
+                + "CONFIG.TDATA_NUM_BYTES {1} "
+                + "CONFIG.HAS_TLAST {1}"
                 + "] $axis_reg_slice_0");
 
-        // =====================================================================
-        // Control ports -> S2MM DMA controller
-        // =====================================================================
-        lines.add("connect_bd_net [get_bd_ports start] [get_bd_pins axi_dma_s2mm_ctrl_wr_0/start]");
-        lines.add("connect_bd_net [get_bd_ports dst_addr] [get_bd_pins axi_dma_s2mm_ctrl_wr_0/dst_addr]");
-        lines.add("connect_bd_net [get_bd_ports transfer_length] [get_bd_pins axi_dma_s2mm_ctrl_wr_0/transfer_length]");
-        lines.add("connect_bd_net [get_bd_pins axi_dma_s2mm_ctrl_wr_0/done] [get_bd_ports done]");
-        lines.add("connect_bd_net [get_bd_pins axi_dma_s2mm_ctrl_wr_0/busy] [get_bd_ports busy]");
-        lines.add("connect_bd_net [get_bd_pins axi_dma_s2mm_ctrl_wr_0/error] [get_bd_ports error]");
+        // Update module references
+        lines.add("update_module_reference [get_ips]");
 
         // =====================================================================
-        // DMA controller -> DMA IP -> Register Slice -> NoC
+        // NoC NSU -> AXI4 Slave (direct connection, no SmartConnect)
+        // =====================================================================
+        lines.add("connect_bd_intf_net [get_bd_intf_pins axi_noc_0/M00_AXI] "
+                + "[get_bd_intf_pins s2mm_axilite_slave_wr_0/s_axi]");
+
+        // =====================================================================
+        // Start OR: either AXI-Lite slave or external s2mm_start can trigger
+        // =====================================================================
+        lines.add("set start_or [create_bd_cell -type ip -vlnv xilinx.com:ip:util_vector_logic:2.0 start_or]");
+        lines.add("set_property -dict [list CONFIG.C_SIZE {1} CONFIG.C_OPERATION {or}] $start_or");
+        lines.add("connect_bd_net [get_bd_pins s2mm_axilite_slave_wr_0/start] [get_bd_pins start_or/Op1]");
+        lines.add("connect_bd_net [get_bd_ports s2mm_start] [get_bd_pins start_or/Op2]");
+        lines.add("connect_bd_net [get_bd_pins start_or/Res] [get_bd_pins axi_dma_s2mm_ctrl_wr_0/start]");
+
+        // =====================================================================
+        // AXI4 Slave -> S2MM DMA controller (address/length)
+        // =====================================================================
+        lines.add("connect_bd_net [get_bd_pins s2mm_axilite_slave_wr_0/dst_addr] [get_bd_pins axi_dma_s2mm_ctrl_wr_0/dst_addr]");
+        lines.add("connect_bd_net [get_bd_pins s2mm_axilite_slave_wr_0/transfer_length] [get_bd_pins axi_dma_s2mm_ctrl_wr_0/transfer_length]");
+
+        // =====================================================================
+        // S2MM DMA controller -> AXI4 Slave + external s2mm_done
+        // =====================================================================
+        lines.add("connect_bd_net [get_bd_pins axi_dma_s2mm_ctrl_wr_0/done] [get_bd_pins s2mm_axilite_slave_wr_0/done] [get_bd_ports s2mm_done]");
+        lines.add("connect_bd_net [get_bd_pins axi_dma_s2mm_ctrl_wr_0/busy] [get_bd_pins s2mm_axilite_slave_wr_0/busy]");
+        lines.add("connect_bd_net [get_bd_pins axi_dma_s2mm_ctrl_wr_0/error] [get_bd_pins s2mm_axilite_slave_wr_0/error]");
+
+        // Interrupt output
+        lines.add("connect_bd_net [get_bd_pins s2mm_axilite_slave_wr_0/interrupt] [get_bd_ports interrupt]");
+
+        // =====================================================================
+        // DMA controller -> DMA IP -> Register Slice -> NoC NMU
         // =====================================================================
         lines.add("connect_bd_intf_net [get_bd_intf_pins axi_dma_s2mm_ctrl_wr_0/m_axi_lite] "
                 + "[get_bd_intf_pins axi_dma_0/S_AXI_LITE]");
@@ -157,12 +189,18 @@ public class S2MMNOCChannel implements RapidComponent {
         lines.add("connect_bd_intf_net [get_bd_intf_pins axis_reg_slice_0/M_AXIS] "
                 + "[get_bd_intf_pins axi_dma_0/S_AXIS_S2MM]");
 
+        // Tie TLAST high on the AXIS register slice input (DMA S2MM requires it)
+        lines.add("set tlast_const [create_bd_cell -type ip -vlnv xilinx.com:ip:xlconstant:1.1 tlast_const]");
+        lines.add("set_property -dict [list CONFIG.CONST_WIDTH {1} CONFIG.CONST_VAL {1}] $tlast_const");
+        lines.add("connect_bd_net [get_bd_pins tlast_const/dout] [get_bd_pins axis_reg_slice_0/s_axis_tlast]");
+
         // =====================================================================
         // Clock connections
         // =====================================================================
         lines.add("connect_bd_net [get_bd_ports clk] [get_bd_pins axi_dma_0/s_axi_lite_aclk]");
         lines.add("connect_bd_net [get_bd_ports clk] [get_bd_pins axi_dma_0/m_axi_s2mm_aclk]");
         lines.add("connect_bd_net [get_bd_ports clk] [get_bd_pins axi_dma_s2mm_ctrl_wr_0/clk]");
+        lines.add("connect_bd_net [get_bd_ports clk] [get_bd_pins s2mm_axilite_slave_wr_0/clk]");
         lines.add("connect_bd_net [get_bd_ports clk] [get_bd_pins axi_noc_0/aclk0]");
         lines.add("connect_bd_net [get_bd_ports clk] [get_bd_pins axi_reg_slice_0/aclk]");
         lines.add("connect_bd_net [get_bd_ports clk] [get_bd_pins axis_reg_slice_0/aclk]");
@@ -172,6 +210,7 @@ public class S2MMNOCChannel implements RapidComponent {
         // =====================================================================
         lines.add("connect_bd_net [get_bd_ports resetn] [get_bd_pins axi_dma_0/axi_resetn]");
         lines.add("connect_bd_net [get_bd_ports resetn] [get_bd_pins axi_dma_s2mm_ctrl_wr_0/rst_n]");
+        lines.add("connect_bd_net [get_bd_ports resetn] [get_bd_pins s2mm_axilite_slave_wr_0/rst_n]");
         lines.add("connect_bd_net [get_bd_ports resetn] [get_bd_pins axi_reg_slice_0/aresetn]");
         lines.add("connect_bd_net [get_bd_ports resetn] [get_bd_pins axis_reg_slice_0/aresetn]");
 
@@ -186,7 +225,6 @@ public class S2MMNOCChannel implements RapidComponent {
         lines.add("validate_bd_design");
         lines.add("save_bd_design");
         lines.add("set bd_file [get_files " + bdName + ".bd]");
-        lines.add("set_property synth_checkpoint_mode None $bd_file");
         lines.add("generate_target all $bd_file");
         lines.add("make_wrapper -files $bd_file -top");
         lines.add("set wrapper_file [file normalize [file dirname $bd_file]/hdl/" + bdName + "_wrapper.v]");
@@ -224,13 +262,9 @@ public class S2MMNOCChannel implements RapidComponent {
         lines.add("s_data.* LEFT");
         lines.add("s_valid LEFT");
         lines.add("s_ready LEFT");
-        // Control signals (TOP)
-        lines.add("start TOP");
-        lines.add("dst_addr.* TOP");
-        lines.add("transfer_length.* TOP");
-        lines.add("done TOP");
-        lines.add("busy TOP");
-        lines.add("error TOP");
+        // FSM control (from MM2S, crosses the array — TOP)
+        lines.add("s2mm_start TOP");
+        lines.add("s2mm_done TOP");
         return InlineFlopTools.parseSideMap(d.getNetlist(), lines);
     }
 }

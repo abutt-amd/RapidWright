@@ -22,6 +22,15 @@
 
 package com.xilinx.rapidwright.design;
 
+import com.xilinx.rapidwright.design.blocks.PBlock;
+import com.xilinx.rapidwright.device.IntentCode;
+import com.xilinx.rapidwright.device.Node;
+import com.xilinx.rapidwright.device.PIP;
+import com.xilinx.rapidwright.device.SiteTypeEnum;
+import com.xilinx.rapidwright.edif.EDIFHierNet;
+import com.xilinx.rapidwright.edif.EDIFPort;
+import com.xilinx.rapidwright.edif.EDIFPortInst;
+
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.EnumSet;
@@ -32,15 +41,6 @@ import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.function.Function;
-
-import com.xilinx.rapidwright.design.blocks.PBlock;
-import com.xilinx.rapidwright.device.IntentCode;
-import com.xilinx.rapidwright.device.Node;
-import com.xilinx.rapidwright.device.PIP;
-import com.xilinx.rapidwright.device.SiteTypeEnum;
-import com.xilinx.rapidwright.edif.EDIFHierNet;
-import com.xilinx.rapidwright.edif.EDIFPort;
-import com.xilinx.rapidwright.edif.EDIFPortInst;
 
 public class NetTools {
     public static final String CONTINUE_ELBOW = "\u251c\u2500 ";
@@ -542,6 +542,10 @@ public class NetTools {
                 EDIFHierNet hierNet = new EDIFHierNet(d.getNetlist().getTopHierCellInst(), portInst.getNet());
                 EDIFHierNet parentNet = d.getNetlist().getParentNet(hierNet);
                 Net net = d.getNet(parentNet.getHierarchicalNetName());
+
+                if (net == null) {
+                    continue;
+                }
 
                 boolean leavesPBlock = false;
                 for (PIP pip : net.getPIPs()) {

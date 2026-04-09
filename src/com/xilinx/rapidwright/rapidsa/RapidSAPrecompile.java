@@ -31,7 +31,6 @@ import com.xilinx.rapidwright.edif.EDIFPort;
 import com.xilinx.rapidwright.edif.EDIFTools;
 import com.xilinx.rapidwright.rapidsa.components.MM2SNOCChannel;
 import com.xilinx.rapidwright.rapidsa.components.RapidComponent;
-import com.xilinx.rapidwright.rapidsa.components.S2MMNOCChannel;
 import com.xilinx.rapidwright.util.FileTools;
 import com.xilinx.rapidwright.util.PerformanceExplorer;
 import com.xilinx.rapidwright.util.PlacerDirective;
@@ -74,8 +73,8 @@ public class RapidSAPrecompile {
 //                    new InputDCUTile(4)
 //                    new DrainTile(4, 16),
 //                    new MM2SChannel(0, "/group/zircon2/abutt/integrated-sa/count_512_clean.mem")
-                    new MM2SNOCChannel(),
-                    new S2MMNOCChannel()
+                    new MM2SNOCChannel()
+//                    new S2MMNOCChannel()
 //                    new SAControlFSM()
             )
     );
@@ -92,7 +91,7 @@ public class RapidSAPrecompile {
 
         lines.add("read_xdc " + compOutputDir + File.separator + XDC_NAME);
         lines.add("update_compile_order -fileset sources_1");
-        lines.add("synth_design -mode out_of_context -flatten_hierarchy none -part $part");
+        lines.add("synth_design -mode out_of_context -part $part");
         lines.add("write_checkpoint -force $output_dir/" + SYNTH_DCP_NAME);
         lines.add("write_edif -force $output_dir/" + SYNTH_EDF_NAME);
 
@@ -102,6 +101,8 @@ public class RapidSAPrecompile {
     private static List<String> getXDCConstraints(RapidComponent component, double clkPeriod) {
         List<String> lines = new ArrayList<>();
         lines.add("create_clock -period " + clkPeriod + " -name clk [get_ports " + component.getClkName() + "]");
+        lines.add("set_clock_uncertainty -setup 0.3 [get_clocks clk]");
+        lines.add("set_clock_uncertainty -hold 0.1 [get_clocks clk]");
         return lines;
     }
 
@@ -142,6 +143,7 @@ public class RapidSAPrecompile {
             pe.setRouterDirectives(DEFAULT_ROUTE_DIRECTIVES);
             pe.setVivadoPath(DEFAULT_VIVADO);
             pe.setContainRouting(true);
+            pe.setBaseClockUncertainty(0.3);
             pe.setAddEDIFAndMetadata(true);
             pe.setGetBestPerPBlock(true);
             pe.setReusePreviousResults(false);

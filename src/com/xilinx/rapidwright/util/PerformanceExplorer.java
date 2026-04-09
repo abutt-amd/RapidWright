@@ -115,6 +115,8 @@ public class PerformanceExplorer {
 
     private boolean lockPlacement;
 
+    private double baseClockUncertainty = 0.0;
+
     Map<EDIFPort, PBlockSide> externalRoutabilitySideMap = null;
 
     public PerformanceExplorer(Design d, String testDir, String clkName, double targetPeriod) {
@@ -308,6 +310,14 @@ public class PerformanceExplorer {
         this.lockPlacement = lockPlacement;
     }
 
+    public double getBaseClockUncertainty() {
+        return baseClockUncertainty;
+    }
+
+    public void setBaseClockUncertainty(double baseClockUncertainty) {
+        this.baseClockUncertainty = baseClockUncertainty;
+    }
+
     public Map<EDIFPort, PBlockSide> getExternalRoutabilitySideMap() {
         return externalRoutabilitySideMap;
     }
@@ -358,7 +368,7 @@ public class PerformanceExplorer {
             lines.add("place_design -unplace");
         }
         lines.add("place_design -directive " + p.name());
-        lines.add("set_clock_uncertainty -setup 0.0 [get_clocks "+clkName+"]");
+        lines.add("set_clock_uncertainty -setup "+baseClockUncertainty+" [get_clocks "+clkName+"]");
         lines.add("report_timing -file "+instDirectory + File.separator+PLACED_TIMING_RESULT);
         lines.add("route_design -directive " + r.name());
         lines.add("report_timing -file "+instDirectory + File.separator+ROUTED_TIMING_RESULT);

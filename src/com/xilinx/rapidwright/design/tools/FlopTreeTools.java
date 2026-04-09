@@ -301,9 +301,9 @@ public class FlopTreeTools {
         return bottomNetCellPair.getSecond();
     }
 
-    private static Net insertFlopChain(Design design, Net net, String clkName, int depth,
+    public static Net insertFlopChain(Design design, Net net, String clkName, int depth,
                                        List<EDIFHierPortInst> portInsts, Set<SiteInst> siteInstsToRoute) {
-        Cell sourceCell = net.getLogicalHierNet().getSourcePortInsts(false).get(0).getPhysicalCell(design);
+        Cell sourceCell = net.getLogicalHierNet().getLeafHierPortInsts(true, false).get(0).getPhysicalCell(design);
         Site sourceSite = sourceCell.getSite();
         Site portInstCentroid = findCentroidOfPortInsts(design, portInsts);
 
@@ -311,6 +311,11 @@ public class FlopTreeTools {
         double srcRow = sourceSite.getTile().getRow();
         double dstCol = portInstCentroid.getTile().getColumn();
         double dstRow = portInstCentroid.getTile().getRow();
+
+        System.out.println("  FlopChain: net=" + net.getName()
+                + " src=" + sourceSite + " (col=" + (int)srcCol + ", row=" + (int)srcRow + ")"
+                + " dst=" + portInstCentroid + " (col=" + (int)dstCol + ", row=" + (int)dstRow + ")"
+                + " depth=" + depth);
 
         Net currentNet = net;
         for (int i = 0; i < depth; i++) {
@@ -325,6 +330,11 @@ public class FlopTreeTools {
 
             Iterator<Site> siteItr = ECOPlacementHelper.spiralOutFrom(target).iterator();
             Pair<Site, BEL> loc = nextAvailFlopPlacement(design, siteItr, null);
+
+            System.out.println("    stage " + i + ": frac=" + String.format("%.3f", frac)
+                    + " target=(col=" + col + ", row=" + row + ")"
+                    + " -> centroid=" + target
+                    + " -> placed=" + loc.getFirst());
 
             Pair<Cell, Net> netCellPair = createAndPlaceFlopForTree(design, currentNet.getLogicalHierNet(),
                     currentNet.getName().replace(EDIFTools.EDIF_HIER_SEP, "_") + "_ff" + i, loc,

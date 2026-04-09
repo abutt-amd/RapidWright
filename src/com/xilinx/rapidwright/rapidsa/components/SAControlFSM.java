@@ -62,6 +62,10 @@ public class SAControlFSM implements RapidComponent {
         RegisterInitTools.setRegisterValue(design, instPrefix + "/output_wr_pipeline_latency_reg", latency, LATENCY_REG_WIDTH);
     }
 
+    public static void setDcuChainLatency(Design design, String instPrefix, int latency) {
+        RegisterInitTools.setRegisterValue(design, instPrefix + "/dcu_chain_latency_reg", latency, SIZE_REG_WIDTH);
+    }
+
 
     @Override
     public String getComponentName() {

@@ -1,6 +1,6 @@
-// S2MM AXI4 Slave Wrapper - Pure Verilog wrapper for SystemVerilog module
+// MM2S AXI4 Slave Wrapper - Pure Verilog wrapper for SystemVerilog module
 
-module s2mm_axilite_slave_wrapper #(
+module mm2s_axilite_slave_wrapper #(
     parameter ADDR_WIDTH = 6,
     parameter DATA_WIDTH = 32,
     parameter ID_WIDTH   = 2
@@ -48,16 +48,17 @@ module s2mm_axilite_slave_wrapper #(
 
     // Control outputs
     output wire                    start,
-    output wire [31:0]             dst_addr,
-    output wire [22:0]             transfer_length,
+    output wire [31:0]             src_addr_a,
+    output wire [22:0]             transfer_length_a,
+    output wire [31:0]             src_addr_b,
+    output wire [22:0]             transfer_length_b,
 
     // Status inputs
     input  wire                    done,
-    input  wire                    busy,
-    input  wire                    error
+    input  wire                    busy
 );
 
-    s2mm_axilite_slave #(
+    mm2s_axilite_slave #(
         .ADDR_WIDTH(ADDR_WIDTH),
         .DATA_WIDTH(DATA_WIDTH),
         .ID_WIDTH(ID_WIDTH)
@@ -99,15 +100,16 @@ module s2mm_axilite_slave_wrapper #(
         .s_axi_rvalid    (s_axi_rvalid),
         .s_axi_rready    (s_axi_rready),
 
-        .interrupt       (interrupt),
+        .interrupt        (interrupt),
 
         .start           (start),
-        .dst_addr        (dst_addr),
-        .transfer_length (transfer_length),
+        .src_addr_a      (src_addr_a),
+        .transfer_length_a (transfer_length_a),
+        .src_addr_b      (src_addr_b),
+        .transfer_length_b (transfer_length_b),
 
         .done            (done),
-        .busy            (busy),
-        .error           (error)
+        .busy            (busy)
     );
 
 endmodule

@@ -87,6 +87,10 @@ public class MM2SNOCChannel implements RapidComponent {
         lines.add("add_files " + rtlPath + "mm2s_demux_wrapper.v");
         lines.add("add_files " + rtlPath + "mm2s_demux.sv");
         lines.add("add_files " + rtlPath + "skid_buffer.sv");
+        lines.add("add_files " + rtlPath + "sa_fsm.sv");
+        lines.add("add_files " + rtlPath + "sa_fsm_wrapper.v");
+        lines.add("add_files " + rtlPath + "mm2s_axilite_slave_wrapper.v");
+        lines.add("add_files " + rtlPath + "mm2s_axilite_slave.sv");
         lines.add("set_property source_mgmt_mode All [current_project]");
         lines.add("update_compile_order -fileset sources_1");
 
@@ -101,16 +105,6 @@ public class MM2SNOCChannel implements RapidComponent {
         lines.add("set resetn [create_bd_port -dir I -type rst resetn]");
         lines.add("set_property CONFIG.POLARITY ACTIVE_LOW $resetn");
 
-        // Sequencer control
-        lines.add("create_bd_port -dir I start");
-        lines.add("create_bd_port -dir I -from 31 -to 0 src_addr_a");
-        lines.add("create_bd_port -dir I -from 22 -to 0 transfer_length_a");
-        lines.add("create_bd_port -dir I -from 31 -to 0 src_addr_b");
-        lines.add("create_bd_port -dir I -from 22 -to 0 transfer_length_b");
-        lines.add("create_bd_port -dir O done");
-        lines.add("create_bd_port -dir O busy");
-        lines.add("create_bd_port -dir O error");
-
         // Demux port A outputs (activations → input DCUs)
         lines.add("create_bd_port -dir O -from 7 -to 0 m_data_a");
         lines.add("create_bd_port -dir O -from 7 -to 0 m_tag_a");
@@ -123,11 +117,25 @@ public class MM2SNOCChannel implements RapidComponent {
         lines.add("create_bd_port -dir O m_valid_b");
         lines.add("create_bd_port -dir I m_ready_b");
 
+        // SA FSM output ports
+        lines.add("create_bd_port -dir O a_rd_en");
+        lines.add("create_bd_port -dir O b_rd_en");
+        lines.add("create_bd_port -dir O output_wr_en");
+        lines.add("create_bd_port -dir O done");
+        lines.add("create_bd_port -dir O sa_accum_shift");
+        lines.add("create_bd_port -dir O s2mm_start");
+        lines.add("create_bd_port -dir I s2mm_done");
+
+        // Interrupt output
+        lines.add("create_bd_port -dir O interrupt");
+
         // =====================================================================
         // IP / module instances
         // =====================================================================
+        lines.add("create_bd_cell -type module -reference sa_fsm_wrapper sa_fsm_0");
         lines.add("create_bd_cell -type module -reference mm2s_noc_sequencer_wrapper mm2s_noc_sequencer_wr_0");
         lines.add("create_bd_cell -type module -reference axi_dma_mm2s_ctrl_wrapper axi_dma_mm2s_ctrl_wr_0");
+        lines.add("create_bd_cell -type module -reference mm2s_axilite_slave_wrapper mm2s_axilite_slave_wr_0");
 
         lines.add("set axi_dma_0 [create_bd_cell -type ip -vlnv xilinx.com:ip:axi_dma:7.1 axi_dma_0]");
         lines.add("set_property -dict [list "
@@ -136,21 +144,23 @@ public class MM2SNOCChannel implements RapidComponent {
                 + "CONFIG.c_include_mm2s_dre {0} "
                 + "CONFIG.c_m_axi_mm2s_data_width {128} "
                 + "CONFIG.c_m_axis_mm2s_tdata_width {8} "
-                + "CONFIG.c_mm2s_burst_size {2}"
+                + "CONFIG.c_mm2s_burst_size {16}"
                 + "] $axi_dma_0");
 
         lines.add("create_bd_cell -type module -reference data_tag_unit_noc_wrapper data_tag_unit_a_0");
 
-        // NoC NMU — 1 slave AXI, 1 INI master, no memory controller
+        // NoC — 1 NMU (data to DDR) + 1 NSU (control from host)
         lines.add("set axi_noc_0 [create_bd_cell -type ip -vlnv xilinx.com:ip:axi_noc:1.1 axi_noc_0]");
         lines.add("set_property -dict [list "
                 + "CONFIG.NUM_SI {1} "
-                + "CONFIG.NUM_MI {0} "
+                + "CONFIG.NUM_MI {1} "
                 + "CONFIG.NUM_MC {0} "
                 + "CONFIG.NUM_CLKS {1} "
-                + "CONFIG.NUM_NMI {1}"
+                + "CONFIG.NUM_NMI {1} "
+                + "CONFIG.NUM_NSI {1}"
                 + "] $axi_noc_0");
-        lines.add("set_property -dict [list CONFIG.CONNECTIONS {M00_INI {}}] [get_bd_intf_pins /axi_noc_0/S00_AXI]");
+        lines.add("set_property -dict [list CONFIG.CONNECTIONS {M00_INI {read_bw {500} write_bw {500}}}] [get_bd_intf_pins /axi_noc_0/S00_AXI]");
+        lines.add("set_property -dict [list CONFIG.CONNECTIONS {M00_AXI {read_bw {500} write_bw {500}}}] [get_bd_intf_pins /axi_noc_0/S00_INI]");
 
         lines.add("create_bd_cell -type module -reference mm2s_demux_wrapper mm2s_demux_wr_0");
 
@@ -161,16 +171,30 @@ public class MM2SNOCChannel implements RapidComponent {
         lines.add("update_module_reference [get_ips]");
 
         // =====================================================================
-        // Sequencer ↔ external ports
+        // NoC NSU -> AXI4 Slave (control path from host)
         // =====================================================================
-        lines.add("connect_bd_net [get_bd_ports start] [get_bd_pins mm2s_noc_sequencer_wr_0/start]");
-        lines.add("connect_bd_net [get_bd_ports src_addr_a] [get_bd_pins mm2s_noc_sequencer_wr_0/src_addr_a]");
-        lines.add("connect_bd_net [get_bd_ports transfer_length_a] [get_bd_pins mm2s_noc_sequencer_wr_0/transfer_length_a]");
-        lines.add("connect_bd_net [get_bd_ports src_addr_b] [get_bd_pins mm2s_noc_sequencer_wr_0/src_addr_b]");
-        lines.add("connect_bd_net [get_bd_ports transfer_length_b] [get_bd_pins mm2s_noc_sequencer_wr_0/transfer_length_b]");
-        lines.add("connect_bd_net [get_bd_pins mm2s_noc_sequencer_wr_0/done] [get_bd_ports done]");
-        lines.add("connect_bd_net [get_bd_pins mm2s_noc_sequencer_wr_0/busy] [get_bd_ports busy]");
-        lines.add("connect_bd_net [get_bd_pins mm2s_noc_sequencer_wr_0/error] [get_bd_ports error]");
+        lines.add("connect_bd_intf_net [get_bd_intf_pins axi_noc_0/M00_AXI] "
+                + "[get_bd_intf_pins mm2s_axilite_slave_wr_0/s_axi]");
+
+        // =====================================================================
+        // AXI4 Slave -> FSM start + Sequencer addresses (internal wiring)
+        // =====================================================================
+        lines.add("connect_bd_net [get_bd_pins mm2s_axilite_slave_wr_0/start] [get_bd_pins sa_fsm_0/start]");
+        lines.add("connect_bd_net [get_bd_pins mm2s_axilite_slave_wr_0/src_addr_a] [get_bd_pins mm2s_noc_sequencer_wr_0/src_addr_a]");
+        lines.add("connect_bd_net [get_bd_pins mm2s_axilite_slave_wr_0/transfer_length_a] [get_bd_pins mm2s_noc_sequencer_wr_0/transfer_length_a]");
+        lines.add("connect_bd_net [get_bd_pins mm2s_axilite_slave_wr_0/src_addr_b] [get_bd_pins mm2s_noc_sequencer_wr_0/src_addr_b]");
+        lines.add("connect_bd_net [get_bd_pins mm2s_axilite_slave_wr_0/transfer_length_b] [get_bd_pins mm2s_noc_sequencer_wr_0/transfer_length_b]");
+
+        // FSM -> Sequencer start, Sequencer done -> FSM
+        lines.add("connect_bd_net [get_bd_pins sa_fsm_0/mm2s_start] [get_bd_pins mm2s_noc_sequencer_wr_0/start]");
+        lines.add("connect_bd_net [get_bd_pins mm2s_noc_sequencer_wr_0/done] [get_bd_pins sa_fsm_0/mm2s_done]");
+
+        // FSM done + busy -> AXI4 Slave status + external ports
+        lines.add("connect_bd_net [get_bd_pins sa_fsm_0/done] [get_bd_pins mm2s_axilite_slave_wr_0/done] [get_bd_ports done]");
+        lines.add("connect_bd_net [get_bd_pins sa_fsm_0/busy] [get_bd_pins mm2s_axilite_slave_wr_0/busy]");
+
+        // Interrupt output
+        lines.add("connect_bd_net [get_bd_pins mm2s_axilite_slave_wr_0/interrupt] [get_bd_ports interrupt]");
 
         // =====================================================================
         // Sequencer dma_* ↔ DMA controller
@@ -234,8 +258,25 @@ public class MM2SNOCChannel implements RapidComponent {
         lines.add("connect_bd_net [get_bd_ports m_ready_b] [get_bd_pins mm2s_demux_wr_0/m_ready_b]");
 
         // =====================================================================
+        // SA FSM connections
+        // =====================================================================
+        // FSM reset: invert resetn (active-low) to reset (active-high)
+        lines.add("set reset_inv [create_bd_cell -type ip -vlnv xilinx.com:ip:util_vector_logic:2.0 reset_inv]");
+        lines.add("set_property -dict [list CONFIG.C_SIZE {1} CONFIG.C_OPERATION {not}] $reset_inv");
+        lines.add("connect_bd_net [get_bd_ports resetn] [get_bd_pins reset_inv/Op1]");
+        lines.add("connect_bd_net [get_bd_pins reset_inv/Res] [get_bd_pins sa_fsm_0/reset]");
+
+        lines.add("connect_bd_net [get_bd_pins sa_fsm_0/a_rd_en] [get_bd_ports a_rd_en]");
+        lines.add("connect_bd_net [get_bd_pins sa_fsm_0/b_rd_en] [get_bd_ports b_rd_en]");
+        lines.add("connect_bd_net [get_bd_pins sa_fsm_0/output_wr_en] [get_bd_ports output_wr_en]");
+        lines.add("connect_bd_net [get_bd_pins sa_fsm_0/sa_accum_shift] [get_bd_ports sa_accum_shift]");
+        lines.add("connect_bd_net [get_bd_pins sa_fsm_0/s2mm_start] [get_bd_ports s2mm_start]");
+        lines.add("connect_bd_net [get_bd_ports s2mm_done] [get_bd_pins sa_fsm_0/s2mm_done]");
+
+        // =====================================================================
         // Clock connections
         // =====================================================================
+        lines.add("connect_bd_net [get_bd_ports clk] [get_bd_pins sa_fsm_0/clk]");
         lines.add("connect_bd_net [get_bd_ports clk] [get_bd_pins axi_dma_0/s_axi_lite_aclk]");
         lines.add("connect_bd_net [get_bd_ports clk] [get_bd_pins axi_dma_0/m_axi_mm2s_aclk]");
         lines.add("connect_bd_net [get_bd_ports clk] [get_bd_pins axi_dma_mm2s_ctrl_wr_0/clk]");
@@ -244,6 +285,7 @@ public class MM2SNOCChannel implements RapidComponent {
         lines.add("connect_bd_net [get_bd_ports clk] [get_bd_pins mm2s_noc_sequencer_wr_0/clk]");
         lines.add("connect_bd_net [get_bd_ports clk] [get_bd_pins axi_reg_slice_0/aclk]");
         lines.add("connect_bd_net [get_bd_ports clk] [get_bd_pins mm2s_demux_wr_0/clk]");
+        lines.add("connect_bd_net [get_bd_ports clk] [get_bd_pins mm2s_axilite_slave_wr_0/clk]");
 
         // =====================================================================
         // Reset connections
@@ -254,6 +296,7 @@ public class MM2SNOCChannel implements RapidComponent {
         lines.add("connect_bd_net [get_bd_ports resetn] [get_bd_pins mm2s_noc_sequencer_wr_0/rst_n]");
         lines.add("connect_bd_net [get_bd_ports resetn] [get_bd_pins axi_reg_slice_0/aresetn]");
         lines.add("connect_bd_net [get_bd_ports resetn] [get_bd_pins mm2s_demux_wr_0/rst_n]");
+        lines.add("connect_bd_net [get_bd_ports resetn] [get_bd_pins mm2s_axilite_slave_wr_0/rst_n]");
 
         // =====================================================================
         // Address assignment
@@ -310,15 +353,14 @@ public class MM2SNOCChannel implements RapidComponent {
         lines.add("m_tag_b.* BOTTOM");
         lines.add("m_valid_b BOTTOM");
         lines.add("m_ready_b BOTTOM");
-        // Control signals (TOP)
-        lines.add("start TOP");
-        lines.add("src_addr_a.* TOP");
-        lines.add("transfer_length_a.* TOP");
-        lines.add("src_addr_b.* TOP");
-        lines.add("transfer_length_b.* TOP");
-        lines.add("done TOP");
-        lines.add("busy TOP");
-        lines.add("error TOP");
+        // FSM outputs (BOTTOM)
+        lines.add("a_rd_en LEFT");
+        lines.add("b_rd_en BOTTOM");
+        lines.add("output_wr_en BOTTOM");
+        lines.add("sa_accum_shift BOTTOM");
+        lines.add("done BOTTOM");
+        lines.add("s2mm_start BOTTOM");
+        lines.add("s2mm_done BOTTOM");
         return InlineFlopTools.parseSideMap(d.getNetlist(), lines);
     }
 }
