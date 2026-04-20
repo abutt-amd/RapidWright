@@ -4,7 +4,7 @@ module sa_fsm #(
     parameter SA_WIDTH = 32,
     parameter SA_HEIGHT = 32,
     parameter K_DIM = 32,
-    parameter SIZE_REG_WIDTH = 32,
+    parameter SIZE_REG_WIDTH = 16,
     parameter LATENCY_REG_WIDTH = 4,
     parameter DCU_CHAIN_LATENCY = 30,
     parameter ACCUM_SHIFT_PIPELINE_LATENCY = 0,
@@ -86,33 +86,28 @@ module sa_fsm #(
     // Counters
     logic [SIZE_REG_WIDTH-1:0] shift_counter;
     logic [SIZE_REG_WIDTH-1:0] shift_counter_next;
-    logic [SIZE_REG_WIDTH-1:0] a_counter;
-    logic [SIZE_REG_WIDTH-1:0] a_counter_next;
-    logic [SIZE_REG_WIDTH-1:0] b_counter;
-    logic [SIZE_REG_WIDTH-1:0] b_counter_next;
+    logic [SIZE_REG_WIDTH-1:0] run_remaining;
+    logic [SIZE_REG_WIDTH-1:0] run_remaining_next;
     logic [SIZE_REG_WIDTH-1:0] propagate_counter;
     logic [SIZE_REG_WIDTH-1:0] propagate_counter_next;
     logic [LATENCY_REG_WIDTH-1:0] accum_shift_wait_counter;
     logic [LATENCY_REG_WIDTH-1:0] accum_shift_wait_counter_next;
     logic [LATENCY_REG_WIDTH-1:0] output_wr_wait_counter;
     logic [LATENCY_REG_WIDTH-1:0] output_wr_wait_counter_next;
-    logic a_done;
-    logic b_done;
+    logic run_done;
 
     always_ff @(posedge clk) begin
         if (reset) begin
             state <= IDLE;
             shift_counter <= '0;
-            a_counter <= '0;
-            b_counter <= '0;
+            run_remaining <= '0;
             propagate_counter <= '0;
             accum_shift_wait_counter <= '0;
             output_wr_wait_counter <= '0;
         end else begin
             state <= next_state;
             shift_counter <= shift_counter_next;
-            a_counter <= a_counter_next;
-            b_counter <= b_counter_next;
+            run_remaining <= run_remaining_next;
             propagate_counter <= propagate_counter_next;
             accum_shift_wait_counter <= accum_shift_wait_counter_next;
             output_wr_wait_counter <= output_wr_wait_counter_next;
@@ -155,7 +150,7 @@ module sa_fsm #(
             end
 
             RUNNING: begin
-                if (a_done && b_done) begin
+                if (run_done) begin
                     next_state = RUNNING_WAIT;
                 end
             end
@@ -210,19 +205,16 @@ module sa_fsm #(
         s2mm_start = 1'b0;
 
         shift_counter_next = shift_counter;
-        a_counter_next = a_counter;
-        b_counter_next = b_counter;
+        run_remaining_next = run_remaining;
         propagate_counter_next = propagate_counter;
         accum_shift_wait_counter_next = accum_shift_wait_counter;
         output_wr_wait_counter_next = output_wr_wait_counter;
 
-        a_done = (a_counter == k_dim);
-        b_done = (b_counter == k_dim);
+        run_done = (run_remaining == '0);
 
         if (state == IDLE) begin
             shift_counter_next = '0;
-            a_counter_next = '0;
-            b_counter_next = '0;
+            run_remaining_next = k_dim;
             propagate_counter_next = '0;
             accum_shift_wait_counter_next = '0;
             output_wr_wait_counter_next = '0;
@@ -251,14 +243,10 @@ module sa_fsm #(
         if (state == RUNNING) begin
             shift_counter_next = '0;
 
-            if (~a_done) begin
+            if (!run_done) begin
                 a_rd_en = 1'b1;
-                a_counter_next = a_counter + 1;
-            end
-
-            if (~b_done) begin
                 b_rd_en = 1'b1;
-                b_counter_next = b_counter + 1;
+                run_remaining_next = run_remaining - 1'b1;
             end
         end
 

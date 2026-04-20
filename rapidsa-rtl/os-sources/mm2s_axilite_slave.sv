@@ -172,6 +172,9 @@ module mm2s_axilite_slave #(
     logic rvalid_reg;
     logic [DATA_WIDTH-1:0] rdata_reg;
     logic [ID_WIDTH-1:0] rid_reg;
+    logic [ADDR_WIDTH-1:0] araddr_reg;
+    logic [ID_WIDTH-1:0] arid_reg;
+    logic ar_pending;
     logic read_req;
 
     assign read_req = s_axi_arvalid && s_axi_arready;
@@ -181,11 +184,19 @@ module mm2s_axilite_slave #(
             rvalid_reg <= 1'b0;
             rdata_reg  <= '0;
             rid_reg    <= '0;
+            araddr_reg <= '0;
+            arid_reg   <= '0;
+            ar_pending <= 1'b0;
         end else begin
             if (read_req) begin
-                rid_reg    <= s_axi_arid;
+                araddr_reg <= s_axi_araddr;
+                arid_reg   <= s_axi_arid;
+                ar_pending <= 1'b1;
+            end else if (ar_pending) begin
+                rid_reg    <= arid_reg;
                 rvalid_reg <= 1'b1;
-                case (s_axi_araddr)
+                ar_pending <= 1'b0;
+                case (araddr_reg)
                     ADDR_CTRL:     rdata_reg <= {29'b0, ap_idle, ap_done, ap_start};
                     ADDR_GIE:      rdata_reg <= {31'b0, gie};
                     ADDR_IER:      rdata_reg <= {30'b0, ier};
@@ -204,7 +215,7 @@ module mm2s_axilite_slave #(
         end
     end
 
-    assign s_axi_arready = !rvalid_reg;
+    assign s_axi_arready = !ar_pending && !rvalid_reg;
     assign s_axi_rvalid  = rvalid_reg;
     assign s_axi_rdata   = rdata_reg;
     assign s_axi_rresp   = 2'b00;

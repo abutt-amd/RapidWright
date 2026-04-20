@@ -69,7 +69,6 @@ public class InputDCUTile implements RapidComponent {
         lines.add("read_verilog -sv " + rtlPath + "fifo.sv");
         lines.add("read_verilog -sv " + rtlPath + "fifo_tile.sv");
         lines.add("read_verilog -sv " + rtlPath + "skid_buffer.sv");
-        lines.add("read_verilog -sv " + rtlPath + "daisy_chain_loader.sv");
         lines.add("read_verilog -sv " + rtlPath + "dcu_fifo_tile_input.sv");
         lines.add("set_property generic {NUM_UNITS=" + height + " } [current_fileset]");
         lines.add("set_property top dcu_fifo_tile_input [current_fileset]");
@@ -90,7 +89,7 @@ public class InputDCUTile implements RapidComponent {
     public PBlock getPBlock() {
         Device device = Device.getDevice("xcv80-lsva4737-2MHP-e-S");
         return new PBlock(device,
-                "SLICE_X72Y880:SLICE_X79Y895");
+                "SLICE_X72Y880:SLICE_X83Y895");
     }
 
     @Override

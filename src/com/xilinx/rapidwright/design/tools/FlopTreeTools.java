@@ -23,10 +23,12 @@ package com.xilinx.rapidwright.design.tools;
 
 import com.xilinx.rapidwright.design.Cell;
 import com.xilinx.rapidwright.design.Design;
+import com.xilinx.rapidwright.design.DesignTools;
 import com.xilinx.rapidwright.design.Net;
 import com.xilinx.rapidwright.design.SiteInst;
 import com.xilinx.rapidwright.design.Unisim;
 import com.xilinx.rapidwright.device.BEL;
+import com.xilinx.rapidwright.device.Series;
 import com.xilinx.rapidwright.device.SLR;
 import com.xilinx.rapidwright.device.Site;
 import com.xilinx.rapidwright.device.SiteTypeEnum;
@@ -185,24 +187,64 @@ public class FlopTreeTools {
                 continue;
             }
             SiteInst candidate = design.getSiteInstFromSite(curr);
-            List<BEL> usedFFs = new ArrayList<>();
+            Set<String> usedBelNames = new HashSet<>();
             if (candidate != null) {
                 for (Cell c : candidate.getCells()) {
-                    if (c.isPlaced() && c.getBEL().isFF() && !c.getBEL().isAnyIMR()) {
-                        usedFFs.add(c.getBEL());
+                    if (c.isPlaced() && c.getBEL() != null) {
+                        usedBelNames.add(c.getBEL().getName());
                     }
                 }
             }
-            if (usedFFs.isEmpty()) {
-                // There is an FF available, use one of them
-                List<BEL> bels = Arrays.stream(curr.getBELs()).filter((BEL b) -> b.isFF() && !b.isAnyIMR())
-                        .collect(Collectors.toList());
-                for (BEL b : bels) {
-                    return new Pair<>(curr, b);
+            for (BEL b : curr.getBELs()) {
+                if (!b.isFF() || b.isAnyIMR()) continue;
+                if (usedBelNames.contains(b.getName())) continue;
+                if (!isControlSetCompatibleForInsertedFDRE(candidate, b)) continue;
+                String belName = b.getName();
+                if (candidate != null) {
+                    // Verify the FF's output site pin is not already in use.
+                    // SLICE FF naming convention: BEL "AFF"->"AQ", "AFF2"->"AQ2", etc.
+                    String sitePinName = null;
+                    if (belName.length() >= 3 && belName.charAt(1) == 'F' && belName.charAt(2) == 'F') {
+                        sitePinName = belName.charAt(0) + "Q" + belName.substring(3);
+                    }
+                    if (sitePinName != null && candidate.getSitePinInst(sitePinName) != null) {
+                        continue;
+                    }
                 }
+                return new Pair<>(curr, b);
             }
         }
         return null;
+    }
+
+    private static boolean isExpectedStaticControlNet(Net net, boolean expectGnd) {
+        if (net == null) {
+            return true;
+        }
+        return expectGnd ? net.isGNDNet() : net.isVCCNet();
+    }
+
+    private static boolean isExpectedStaticControlNet(SiteInst candidate, String sitePinName, boolean expectGnd) {
+        com.xilinx.rapidwright.design.SitePinInst sitePin = candidate.getSitePinInst(sitePinName);
+        if (sitePin != null && !isExpectedStaticControlNet(sitePin.getNet(), expectGnd)) {
+            return false;
+        }
+        return isExpectedStaticControlNet(candidate.getNetFromSiteWire(sitePinName), expectGnd);
+    }
+
+    static boolean isControlSetCompatibleForInsertedFDRE(SiteInst candidate, BEL bel) {
+        if (candidate == null || bel == null || candidate.getDesign().getSeries() != Series.Versal) {
+            return true;
+        }
+
+        Pair<String, String> sitePinNames =
+                DesignTools.belTypeSitePinNameMapping.get(Series.Versal).get(bel.getName());
+        if (sitePinNames == null) {
+            return true;
+        }
+
+        return isExpectedStaticControlNet(candidate, sitePinNames.getFirst(), false)
+                && isExpectedStaticControlNet(candidate, sitePinNames.getSecond(), true);
     }
 
     private static Pair<Site, Net> placeFlopNearCentroidOfPortInsts(Design design, String clkName, Net inputNet,

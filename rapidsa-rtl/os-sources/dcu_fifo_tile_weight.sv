@@ -1,31 +1,40 @@
 `timescale 1ns / 1ps
 
 module dcu_fifo_tile_weight #(
-    parameter DATA_WIDTH = 8,
-    parameter TAG_WIDTH = 8,
-    parameter NUM_UNITS = 4,
+    parameter AXIS_WIDTH    = 128,
+    parameter DATA_WIDTH    = 8,
+    parameter TAG_WIDTH     = 8,
+    parameter NUM_UNITS     = 4,
     parameter FIFO_PTR_SIZE = 6,
-    parameter ID_WIDTH = 8,
-    parameter ID_OFFSET = 0
+    parameter ID_WIDTH      = 8,
+    parameter ID_OFFSET     = 0,
+    parameter ELEM_REG_WIDTH = 8
 )(
     input logic clk,
     input logic reset,
 
-    input logic [DATA_WIDTH-1:0] s_data,
-    input logic [TAG_WIDTH-1:0]  s_tag,
-    input logic                  s_valid,
-    output logic                 s_ready,
+    // Wide tagged input (from previous tile or DTU)
+    input  logic [NUM_LANES*DATA_WIDTH-1:0] s_data,
+    input  logic [NUM_LANES*TAG_WIDTH-1:0]  s_tag,
+    input  logic                            s_valid,
+    output logic                            s_ready,
 
-    output logic [DATA_WIDTH-1:0] m_data,
-    output logic [TAG_WIDTH-1:0]  m_tag,
-    output logic                  m_valid,
-    input logic                   m_ready,
+    // Wide tagged output (to next tile)
+    output logic [NUM_LANES*DATA_WIDTH-1:0] m_data,
+    output logic [NUM_LANES*TAG_WIDTH-1:0]  m_tag,
+    output logic                            m_valid,
+    input  logic                            m_ready,
 
+    // FIFO read interface
     input logic                   rd_en,
     output logic                  rd_en_out,
     output logic [DATA_WIDTH-1:0] dout       [NUM_UNITS-1:0],
     output logic                  dout_valid [NUM_UNITS-1:0]
 );
+
+    localparam NUM_LANES  = AXIS_WIDTH / DATA_WIDTH;
+    localparam LANE_WIDTH = DATA_WIDTH + TAG_WIDTH;
+    localparam BUS_WIDTH  = NUM_LANES * LANE_WIDTH;
 
     // ID register initialized to ID_OFFSET, feeds back to itself
     (* dont_touch = "true" *) logic [ID_WIDTH-1:0] id_reg = ID_OFFSET;
@@ -33,75 +42,129 @@ module dcu_fifo_tile_weight #(
         id_reg <= id_reg;
     end
 
-    // Chain wires between DCU stages (direct connection, no internal skid buffers)
-    logic [DATA_WIDTH-1:0] chain_data  [NUM_UNITS:0];
-    logic [TAG_WIDTH-1:0]  chain_tag   [NUM_UNITS:0];
-    logic                  chain_valid [NUM_UNITS:0];
-    logic                  chain_ready [NUM_UNITS:0];
+    // =========================================================================
+    // Stage 1: Input skid buffer
+    // =========================================================================
+    logic [NUM_LANES*DATA_WIDTH-1:0] s1_data;
+    logic [NUM_LANES*TAG_WIDTH-1:0]  s1_tag;
+    logic                            s1_valid;
+    logic                            s1_ready;
 
-    logic [DATA_WIDTH-1:0] fifo_wdata [NUM_UNITS-1:0];
-    logic                  fifo_wen   [NUM_UNITS-1:0];
-    logic                  fifo_full  [NUM_UNITS-1:0];
-    logic                  fifo_empty [NUM_UNITS-1:0];
-
-    // Skid buffer at tile input breaks the inter-tile timing path
-    skid_buffer #(
-        .WIDTH(DATA_WIDTH + TAG_WIDTH)
-    ) u_skid_in (
+    skid_buffer #(.WIDTH(BUS_WIDTH)) u_skid_in (
         .clk(clk),
         .rst_n(~reset),
         .s_data({s_data, s_tag}),
         .s_valid(s_valid),
         .s_ready(s_ready),
-        .m_data({chain_data[0], chain_tag[0]}),
-        .m_valid(chain_valid[0]),
-        .m_ready(chain_ready[0])
+        .m_data({s1_data, s1_tag}),
+        .m_valid(s1_valid),
+        .m_ready(s1_ready)
     );
 
-    // Skid buffer at tile output breaks the inter-tile ready/valid/data path
-    skid_buffer #(
-        .WIDTH(DATA_WIDTH + TAG_WIDTH)
-    ) u_skid_out (
+    // =========================================================================
+    // Stage 2: Tag comparison (registered)
+    // =========================================================================
+    logic [NUM_UNITS-1:0] match_s2 [NUM_LANES-1:0];
+    logic [NUM_LANES*DATA_WIDTH-1:0] data_s2;
+    logic [NUM_LANES*TAG_WIDTH-1:0]  tag_s2;
+    logic                            valid_s2;
+    logic                            ready_s2;
+
+    logic [TAG_WIDTH-1:0] lane_tag_s1 [NUM_LANES-1:0];
+    logic [DATA_WIDTH-1:0] lane_data_s1 [NUM_LANES-1:0];
+    genvar g;
+    generate
+        for (g = 0; g < NUM_LANES; g++) begin : gen_unpack_s1
+            assign lane_tag_s1[g]  = s1_tag[g*TAG_WIDTH +: TAG_WIDTH];
+            assign lane_data_s1[g] = s1_data[g*DATA_WIDTH +: DATA_WIDTH];
+        end
+    endgenerate
+
+    assign s1_ready = !valid_s2 || ready_s2;
+
+    always_ff @(posedge clk) begin
+        if (reset) begin
+            valid_s2 <= 1'b0;
+        end else if (s1_ready) begin
+            valid_s2 <= s1_valid;
+            data_s2  <= s1_data;
+            tag_s2   <= s1_tag;
+            for (int lane = 0; lane < NUM_LANES; lane++) begin
+                for (int unit = 0; unit < NUM_UNITS; unit++) begin
+                    match_s2[lane][unit] <= (lane_tag_s1[lane] == id_reg + ID_WIDTH'(unit));
+                end
+            end
+        end
+    end
+
+    // =========================================================================
+    // Stage 3: FIFO write from registered matches
+    // =========================================================================
+    logic [DATA_WIDTH-1:0] fifo_wdata [NUM_UNITS-1:0];
+    logic                  fifo_wen   [NUM_UNITS-1:0];
+    logic                  fifo_empty [NUM_UNITS-1:0];
+
+    logic [DATA_WIDTH-1:0] lane_data_s2 [NUM_LANES-1:0];
+    generate
+        for (g = 0; g < NUM_LANES; g++) begin : gen_unpack_s2
+            assign lane_data_s2[g] = data_s2[g*DATA_WIDTH +: DATA_WIDTH];
+        end
+    endgenerate
+
+    always_comb begin
+        for (int unit = 0; unit < NUM_UNITS; unit++) begin
+            fifo_wen[unit]   = 1'b0;
+            fifo_wdata[unit] = '0;
+            for (int lane = NUM_LANES - 1; lane >= 0; lane--) begin
+                if (match_s2[lane][unit]) begin
+                    fifo_wen[unit]   = valid_s2;
+                    fifo_wdata[unit] = lane_data_s2[lane];
+                end
+            end
+        end
+    end
+
+    logic ready_s3;
+    assign ready_s2 = ready_s3;
+
+    // =========================================================================
+    // Stage 4: Output skid buffer (forward to next tile)
+    // =========================================================================
+    logic [NUM_LANES*DATA_WIDTH-1:0] out_data;
+    logic [NUM_LANES*TAG_WIDTH-1:0]  out_tag;
+
+    always_ff @(posedge clk) begin
+        if (reset) begin
+            out_data <= '0;
+            out_tag  <= '0;
+        end else if (ready_s2) begin
+            out_data <= data_s2;
+            out_tag  <= tag_s2;
+        end
+    end
+
+    logic out_valid;
+    always_ff @(posedge clk) begin
+        if (reset)
+            out_valid <= 1'b0;
+        else if (ready_s3)
+            out_valid <= valid_s2;
+    end
+
+    skid_buffer #(.WIDTH(BUS_WIDTH)) u_skid_out (
         .clk(clk),
         .rst_n(~reset),
-        .s_data({chain_data[NUM_UNITS], chain_tag[NUM_UNITS]}),
-        .s_valid(chain_valid[NUM_UNITS]),
-        .s_ready(chain_ready[NUM_UNITS]),
+        .s_data({out_data, out_tag}),
+        .s_valid(out_valid),
+        .s_ready(ready_s3),
         .m_data({m_data, m_tag}),
         .m_valid(m_valid),
         .m_ready(m_ready)
     );
 
-    genvar i;
-    generate
-        for (i = 0; i < NUM_UNITS; i = i + 1) begin : gen_dcu
-            daisy_chain_loader #(
-                .DATA_WIDTH(DATA_WIDTH),
-                .TAG_WIDTH(TAG_WIDTH),
-                .ID_WIDTH(ID_WIDTH)
-            ) u_dcu (
-                .clk(clk),
-                .rst_n(~reset),
-                .id(id_reg + ID_WIDTH'(i)),
-                .s_data(chain_data[i]),
-                .s_tag(chain_tag[i]),
-                .s_valid(chain_valid[i]),
-                .s_ready(chain_ready[i]),
-                .m_data(chain_data[i+1]),
-                .m_tag(chain_tag[i+1]),
-                .m_valid(chain_valid[i+1]),
-                .m_ready(chain_ready[i+1]),
-                .fifo_wdata(fifo_wdata[i]),
-                .fifo_wen(fifo_wen[i]),
-                .fifo_full(fifo_full[i])
-            );
-
-            assign fifo_full[i] = fifo_full_internal[i];
-        end
-    endgenerate
-
-    // rd_en pipeline: input feeds unit 0, registered between each subsequent unit
-    // Register rd_en at tile input to break inter-tile timing path
+    // =========================================================================
+    // rd_en pipeline
+    // =========================================================================
     logic rd_en_pipe [NUM_UNITS:0];
     always_ff @(posedge clk) begin
         if (reset)
@@ -111,27 +174,28 @@ module dcu_fifo_tile_weight #(
     end
 
     generate
-        for (i = 0; i < NUM_UNITS; i = i + 1) begin : gen_rd_en_pipe
+        for (g = 0; g < NUM_UNITS; g++) begin : gen_rd_en_pipe
             always_ff @(posedge clk) begin
                 if (reset)
-                    rd_en_pipe[i+1] <= 1'b0;
+                    rd_en_pipe[g+1] <= 1'b0;
                 else
-                    rd_en_pipe[i+1] <= rd_en_pipe[i];
+                    rd_en_pipe[g+1] <= rd_en_pipe[g];
             end
         end
     endgenerate
 
-    // Output rd_en is the last pipeline stage (already registered)
     assign rd_en_out = rd_en_pipe[NUM_UNITS];
 
-    // Build rd_en array for fifo_tile from pipeline
     logic rd_en_arr [NUM_UNITS-1:0];
     generate
-        for (i = 0; i < NUM_UNITS; i = i + 1) begin : gen_rd_en_arr
-            assign rd_en_arr[i] = rd_en_pipe[i];
+        for (g = 0; g < NUM_UNITS; g++) begin : gen_rd_en_arr
+            assign rd_en_arr[g] = rd_en_pipe[g];
         end
     endgenerate
 
+    // =========================================================================
+    // FIFO tile
+    // =========================================================================
     logic [FIFO_PTR_SIZE:0] fifo_count [NUM_UNITS-1:0];
     logic                   fifo_full_internal [NUM_UNITS-1:0];
 
@@ -152,12 +216,12 @@ module dcu_fifo_tile_weight #(
     );
 
     generate
-        for (i = 0; i < NUM_UNITS; i = i + 1) begin : gen_dout_valid
+        for (g = 0; g < NUM_UNITS; g++) begin : gen_dout_valid
             always_ff @(posedge clk) begin
                 if (reset) begin
-                    dout_valid[i] <= 1'b0;
+                    dout_valid[g] <= 1'b0;
                 end else begin
-                    dout_valid[i] <= ~fifo_empty[i] && rd_en_arr[i];
+                    dout_valid[g] <= ~fifo_empty[g] && rd_en_arr[g];
                 end
             end
         end

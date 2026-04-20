@@ -69,13 +69,11 @@ public class RapidSAPrecompile {
     private static final List<RapidComponent> COMPONENTS = Collections.unmodifiableList(
             Arrays.asList(
 //                    new GEMMTile(4, 4),
-//                    new WeightDCUTile(4),
-//                    new InputDCUTile(4)
+//                    new EdgeBufferTile(4, EdgeBufferTile.Type.WEIGHT),
+//                    new EdgeBufferTile(4, EdgeBufferTile.Type.INPUT)
 //                    new DrainTile(4, 16),
-//                    new MM2SChannel(0, "/group/zircon2/abutt/integrated-sa/count_512_clean.mem")
                     new MM2SNOCChannel()
 //                    new S2MMNOCChannel()
-//                    new SAControlFSM()
             )
     );
 

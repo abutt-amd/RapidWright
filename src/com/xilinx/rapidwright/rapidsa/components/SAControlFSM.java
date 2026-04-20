@@ -39,7 +39,7 @@ import java.util.Map;
 
 public class SAControlFSM implements RapidComponent {
 
-    private static final int SIZE_REG_WIDTH = 32;
+    private static final int SIZE_REG_WIDTH = 16;
     private static final int LATENCY_REG_WIDTH = 4;
 
     public static void setSAWidth(Design design, String instPrefix, int width) {

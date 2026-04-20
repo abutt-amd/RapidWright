@@ -27,7 +27,6 @@ import com.xilinx.rapidwright.design.Design;
 import com.xilinx.rapidwright.design.blocks.PBlock;
 import com.xilinx.rapidwright.design.blocks.PBlockSide;
 import com.xilinx.rapidwright.design.tools.InlineFlopTools;
-import com.xilinx.rapidwright.design.tools.RegisterInitTools;
 import com.xilinx.rapidwright.device.Device;
 import com.xilinx.rapidwright.edif.EDIFPort;
 import com.xilinx.rapidwright.util.FileTools;
@@ -38,30 +37,22 @@ import java.util.List;
 import java.util.Map;
 
 /**
- * RapidComponent for a dual-matrix sequential DMA channel via single NoC NMU.
+ * RapidComponent for the MM2S DMA channel via NoC NMU.
  *
- * Sequentially DMAs two matrices (activation then weight) through the same
- * DMA+NoC path, tags each appropriately, and routes them to separate output
- * ports for the input DCU chain and weight DCU chain.
+ * Loads K-major matrices from DDR through the NoC. Outputs raw 128-bit data
+ * on two ports (A for activations, B for weights) with valid signals.
+ * No DTU, no tags — the K-major data layout makes distribution trivial.
  *
- * Contains: mm2s_noc_sequencer, AXI DMA (MM2S only), AXI DMA control wrapper,
- * AXI NoC (1 slave, 1 INI master), data tag unit, and mm2s_demux.
+ * The DMA output (128-bit matched width) is demuxed to port A or B based
+ * on the sequencer's active_channel signal. Each port feeds a forwarding
+ * chain of Edge Buffer tiles.
+ *
+ * Contains: AXI DMA (MM2S, 128:128), AXI DMA controller, MM2S NOC sequencer,
+ * SA FSM, AXI-Lite slave, AXI NoC (NMU + NSU), AXI register slice.
  */
 public class MM2SNOCChannel implements RapidComponent {
 
-    private static final int DIM_WIDTH = 8;
-    private static final String HEIGHT_REG = "mm2s_channel_i/data_tag_unit_a_0/inst/inst/matrix_height_reg_reg";
-    private static final String WIDTH_REG  = "mm2s_channel_i/data_tag_unit_a_0/inst/inst/matrix_width_reg_reg";
-
     public MM2SNOCChannel() {
-    }
-
-    public static void setMatrixHeight(Design design, String instPrefix, int value) {
-        RegisterInitTools.setRegisterValue(design, instPrefix + "/" + HEIGHT_REG, value, DIM_WIDTH);
-    }
-
-    public static void setMatrixWidth(Design design, String instPrefix, int value) {
-        RegisterInitTools.setRegisterValue(design, instPrefix + "/" + WIDTH_REG, value, DIM_WIDTH);
     }
 
     @Override
@@ -80,17 +71,13 @@ public class MM2SNOCChannel implements RapidComponent {
         // Add HDL sources needed for module references in the block design
         lines.add("add_files " + rtlPath + "axi_dma_mm2s_ctrl_wrapper.v");
         lines.add("add_files " + rtlPath + "axi_dma_mm2s_ctrl.sv");
-        lines.add("add_files " + rtlPath + "data_tag_unit_noc_wrapper.v");
-        lines.add("add_files " + rtlPath + "data_tag_unit_noc.sv");
         lines.add("add_files " + rtlPath + "mm2s_noc_sequencer_wrapper.v");
         lines.add("add_files " + rtlPath + "mm2s_noc_sequencer.sv");
-        lines.add("add_files " + rtlPath + "mm2s_demux_wrapper.v");
-        lines.add("add_files " + rtlPath + "mm2s_demux.sv");
-        lines.add("add_files " + rtlPath + "skid_buffer.sv");
         lines.add("add_files " + rtlPath + "sa_fsm.sv");
         lines.add("add_files " + rtlPath + "sa_fsm_wrapper.v");
         lines.add("add_files " + rtlPath + "mm2s_axilite_slave_wrapper.v");
         lines.add("add_files " + rtlPath + "mm2s_axilite_slave.sv");
+        lines.add("add_files " + rtlPath + "valid_demux.v");
         lines.add("set_property source_mgmt_mode All [current_project]");
         lines.add("update_compile_order -fileset sources_1");
 
@@ -105,17 +92,13 @@ public class MM2SNOCChannel implements RapidComponent {
         lines.add("set resetn [create_bd_port -dir I -type rst resetn]");
         lines.add("set_property CONFIG.POLARITY ACTIVE_LOW $resetn");
 
-        // Demux port A outputs (activations → input DCUs)
-        lines.add("create_bd_port -dir O -from 7 -to 0 m_data_a");
-        lines.add("create_bd_port -dir O -from 7 -to 0 m_tag_a");
+        // 128-bit data output port A (activations → input Edge Buffer chain)
+        lines.add("create_bd_port -dir O -from 127 -to 0 m_data_a");
         lines.add("create_bd_port -dir O m_valid_a");
-        lines.add("create_bd_port -dir I m_ready_a");
 
-        // Demux port B outputs (weights → weight DCUs)
-        lines.add("create_bd_port -dir O -from 7 -to 0 m_data_b");
-        lines.add("create_bd_port -dir O -from 7 -to 0 m_tag_b");
+        // 128-bit data output port B (weights → weight Edge Buffer chain)
+        lines.add("create_bd_port -dir O -from 127 -to 0 m_data_b");
         lines.add("create_bd_port -dir O m_valid_b");
-        lines.add("create_bd_port -dir I m_ready_b");
 
         // SA FSM output ports
         lines.add("create_bd_port -dir O a_rd_en");
@@ -136,6 +119,7 @@ public class MM2SNOCChannel implements RapidComponent {
         lines.add("create_bd_cell -type module -reference mm2s_noc_sequencer_wrapper mm2s_noc_sequencer_wr_0");
         lines.add("create_bd_cell -type module -reference axi_dma_mm2s_ctrl_wrapper axi_dma_mm2s_ctrl_wr_0");
         lines.add("create_bd_cell -type module -reference mm2s_axilite_slave_wrapper mm2s_axilite_slave_wr_0");
+        lines.add("create_bd_cell -type module -reference valid_demux valid_demux_0");
 
         lines.add("set axi_dma_0 [create_bd_cell -type ip -vlnv xilinx.com:ip:axi_dma:7.1 axi_dma_0]");
         lines.add("set_property -dict [list "
@@ -143,11 +127,9 @@ public class MM2SNOCChannel implements RapidComponent {
                 + "CONFIG.c_include_sg {0} "
                 + "CONFIG.c_include_mm2s_dre {0} "
                 + "CONFIG.c_m_axi_mm2s_data_width {128} "
-                + "CONFIG.c_m_axis_mm2s_tdata_width {8} "
+                + "CONFIG.c_m_axis_mm2s_tdata_width {128} "
                 + "CONFIG.c_mm2s_burst_size {16}"
                 + "] $axi_dma_0");
-
-        lines.add("create_bd_cell -type module -reference data_tag_unit_noc_wrapper data_tag_unit_a_0");
 
         // NoC — 1 NMU (data to DDR) + 1 NSU (control from host)
         lines.add("set axi_noc_0 [create_bd_cell -type ip -vlnv xilinx.com:ip:axi_noc:1.1 axi_noc_0]");
@@ -161,8 +143,6 @@ public class MM2SNOCChannel implements RapidComponent {
                 + "] $axi_noc_0");
         lines.add("set_property -dict [list CONFIG.CONNECTIONS {M00_INI {read_bw {500} write_bw {500}}}] [get_bd_intf_pins /axi_noc_0/S00_AXI]");
         lines.add("set_property -dict [list CONFIG.CONNECTIONS {M00_AXI {read_bw {500} write_bw {500}}}] [get_bd_intf_pins /axi_noc_0/S00_INI]");
-
-        lines.add("create_bd_cell -type module -reference mm2s_demux_wrapper mm2s_demux_wr_0");
 
         // AXI Register Slice between DMA and NoC
         lines.add("set axi_reg_slice_0 [create_bd_cell -type ip -vlnv xilinx.com:ip:axi_register_slice:2.1 axi_reg_slice_0]");
@@ -217,58 +197,35 @@ public class MM2SNOCChannel implements RapidComponent {
                 + "[get_bd_intf_pins axi_noc_0/S00_AXI]");
 
         // =====================================================================
-        // DMA M_AXIS_MM2S → DTU
+        // DMA M_AXIS_MM2S (128-bit) → demux to port A / port B
+        // Data is broadcast to both ports. Valid is gated by active_channel.
+        // active_channel=0 → activations (port A), active_channel=1 → weights (port B)
         // =====================================================================
-        lines.add("connect_bd_net [get_bd_pins axi_dma_0/m_axis_mm2s_tdata] [get_bd_pins data_tag_unit_a_0/s_axis_tdata]");
-        lines.add("connect_bd_net [get_bd_pins axi_dma_0/m_axis_mm2s_tvalid] [get_bd_pins data_tag_unit_a_0/s_axis_tvalid]");
-        lines.add("connect_bd_net [get_bd_pins data_tag_unit_a_0/s_axis_tready] [get_bd_pins axi_dma_0/m_axis_mm2s_tready]");
+        lines.add("connect_bd_net [get_bd_pins axi_dma_0/m_axis_mm2s_tdata] [get_bd_ports m_data_a] [get_bd_ports m_data_b]");
 
-        // =====================================================================
-        // Sequencer active_channel → DTU tag_source_in + demux sel
-        // =====================================================================
-        lines.add("connect_bd_net [get_bd_pins mm2s_noc_sequencer_wr_0/active_channel] [get_bd_pins data_tag_unit_a_0/tag_source_in] [get_bd_pins mm2s_demux_wr_0/sel]");
+        // Valid demux: m_valid_a = tvalid & ~active_channel,  m_valid_b = tvalid & active_channel
+        lines.add("connect_bd_net [get_bd_pins axi_dma_0/m_axis_mm2s_tvalid] [get_bd_pins valid_demux_0/tvalid]");
+        lines.add("connect_bd_net [get_bd_pins mm2s_noc_sequencer_wr_0/active_channel] [get_bd_pins valid_demux_0/active_channel]");
+        lines.add("connect_bd_net [get_bd_ports resetn] [get_bd_pins valid_demux_0/resetn]");
+        lines.add("connect_bd_net [get_bd_pins valid_demux_0/m_valid_a] [get_bd_ports m_valid_a]");
+        lines.add("connect_bd_net [get_bd_pins valid_demux_0/m_valid_b] [get_bd_ports m_valid_b]");
 
-        // =====================================================================
-        // Sequencer clr_en → DTU clr_en
-        // =====================================================================
-        lines.add("connect_bd_net [get_bd_pins mm2s_noc_sequencer_wr_0/clr_en] [get_bd_pins data_tag_unit_a_0/clr_en]");
-
-        // =====================================================================
-        // DTU → demux (slave side)
-        // =====================================================================
-        lines.add("connect_bd_net [get_bd_pins data_tag_unit_a_0/m_data] [get_bd_pins mm2s_demux_wr_0/s_data]");
-        lines.add("connect_bd_net [get_bd_pins data_tag_unit_a_0/m_tag] [get_bd_pins mm2s_demux_wr_0/s_tag]");
-        lines.add("connect_bd_net [get_bd_pins data_tag_unit_a_0/m_valid] [get_bd_pins mm2s_demux_wr_0/s_valid]");
-        lines.add("connect_bd_net [get_bd_pins mm2s_demux_wr_0/s_ready] [get_bd_pins data_tag_unit_a_0/m_ready]");
-
-        // =====================================================================
-        // Demux port A → external ports
-        // =====================================================================
-        lines.add("connect_bd_net [get_bd_pins mm2s_demux_wr_0/m_data_a] [get_bd_ports m_data_a]");
-        lines.add("connect_bd_net [get_bd_pins mm2s_demux_wr_0/m_tag_a] [get_bd_ports m_tag_a]");
-        lines.add("connect_bd_net [get_bd_pins mm2s_demux_wr_0/m_valid_a] [get_bd_ports m_valid_a]");
-        lines.add("connect_bd_net [get_bd_ports m_ready_a] [get_bd_pins mm2s_demux_wr_0/m_ready_a]");
-
-        // =====================================================================
-        // Demux port B → external ports
-        // =====================================================================
-        lines.add("connect_bd_net [get_bd_pins mm2s_demux_wr_0/m_data_b] [get_bd_ports m_data_b]");
-        lines.add("connect_bd_net [get_bd_pins mm2s_demux_wr_0/m_tag_b] [get_bd_ports m_tag_b]");
-        lines.add("connect_bd_net [get_bd_pins mm2s_demux_wr_0/m_valid_b] [get_bd_ports m_valid_b]");
-        lines.add("connect_bd_net [get_bd_ports m_ready_b] [get_bd_pins mm2s_demux_wr_0/m_ready_b]");
+        // tready always high — no backpressure, FIFOs sized to never overflow
+        lines.add("set tready_const [create_bd_cell -type ip -vlnv xilinx.com:ip:xlconstant:1.1 tready_const]");
+        lines.add("set_property -dict [list CONFIG.CONST_WIDTH {1} CONFIG.CONST_VAL {1}] $tready_const");
+        lines.add("connect_bd_net [get_bd_pins tready_const/dout] [get_bd_pins axi_dma_0/m_axis_mm2s_tready]");
 
         // =====================================================================
         // SA FSM connections
         // =====================================================================
-        // FSM reset: invert resetn (active-low) to reset (active-high)
-        lines.add("set reset_inv [create_bd_cell -type ip -vlnv xilinx.com:ip:util_vector_logic:2.0 reset_inv]");
-        lines.add("set_property -dict [list CONFIG.C_SIZE {1} CONFIG.C_OPERATION {not}] $reset_inv");
-        lines.add("connect_bd_net [get_bd_ports resetn] [get_bd_pins reset_inv/Op1]");
-        lines.add("connect_bd_net [get_bd_pins reset_inv/Res] [get_bd_pins sa_fsm_0/reset]");
+        lines.add("connect_bd_net [get_bd_pins valid_demux_0/reset] [get_bd_pins sa_fsm_0/reset]");
 
-        lines.add("connect_bd_net [get_bd_pins sa_fsm_0/a_rd_en] [get_bd_ports a_rd_en]");
-        lines.add("connect_bd_net [get_bd_pins sa_fsm_0/b_rd_en] [get_bd_ports b_rd_en]");
-        lines.add("connect_bd_net [get_bd_pins sa_fsm_0/output_wr_en] [get_bd_ports output_wr_en]");
+        lines.add("connect_bd_net [get_bd_pins sa_fsm_0/a_rd_en] [get_bd_pins valid_demux_0/a_rd_en_in]");
+        lines.add("connect_bd_net [get_bd_pins sa_fsm_0/b_rd_en] [get_bd_pins valid_demux_0/b_rd_en_in]");
+        lines.add("connect_bd_net [get_bd_pins sa_fsm_0/output_wr_en] [get_bd_pins valid_demux_0/output_wr_en_in]");
+        lines.add("connect_bd_net [get_bd_pins valid_demux_0/a_rd_en] [get_bd_ports a_rd_en]");
+        lines.add("connect_bd_net [get_bd_pins valid_demux_0/b_rd_en] [get_bd_ports b_rd_en]");
+        lines.add("connect_bd_net [get_bd_pins valid_demux_0/output_wr_en] [get_bd_ports output_wr_en]");
         lines.add("connect_bd_net [get_bd_pins sa_fsm_0/sa_accum_shift] [get_bd_ports sa_accum_shift]");
         lines.add("connect_bd_net [get_bd_pins sa_fsm_0/s2mm_start] [get_bd_ports s2mm_start]");
         lines.add("connect_bd_net [get_bd_ports s2mm_done] [get_bd_pins sa_fsm_0/s2mm_done]");
@@ -280,22 +237,19 @@ public class MM2SNOCChannel implements RapidComponent {
         lines.add("connect_bd_net [get_bd_ports clk] [get_bd_pins axi_dma_0/s_axi_lite_aclk]");
         lines.add("connect_bd_net [get_bd_ports clk] [get_bd_pins axi_dma_0/m_axi_mm2s_aclk]");
         lines.add("connect_bd_net [get_bd_ports clk] [get_bd_pins axi_dma_mm2s_ctrl_wr_0/clk]");
-        lines.add("connect_bd_net [get_bd_ports clk] [get_bd_pins data_tag_unit_a_0/clk]");
         lines.add("connect_bd_net [get_bd_ports clk] [get_bd_pins axi_noc_0/aclk0]");
         lines.add("connect_bd_net [get_bd_ports clk] [get_bd_pins mm2s_noc_sequencer_wr_0/clk]");
         lines.add("connect_bd_net [get_bd_ports clk] [get_bd_pins axi_reg_slice_0/aclk]");
-        lines.add("connect_bd_net [get_bd_ports clk] [get_bd_pins mm2s_demux_wr_0/clk]");
         lines.add("connect_bd_net [get_bd_ports clk] [get_bd_pins mm2s_axilite_slave_wr_0/clk]");
+        lines.add("connect_bd_net [get_bd_ports clk] [get_bd_pins valid_demux_0/clk]");
 
         // =====================================================================
         // Reset connections
         // =====================================================================
         lines.add("connect_bd_net [get_bd_ports resetn] [get_bd_pins axi_dma_0/axi_resetn]");
         lines.add("connect_bd_net [get_bd_ports resetn] [get_bd_pins axi_dma_mm2s_ctrl_wr_0/rst_n]");
-        lines.add("connect_bd_net [get_bd_ports resetn] [get_bd_pins data_tag_unit_a_0/rst_n]");
         lines.add("connect_bd_net [get_bd_ports resetn] [get_bd_pins mm2s_noc_sequencer_wr_0/rst_n]");
         lines.add("connect_bd_net [get_bd_ports resetn] [get_bd_pins axi_reg_slice_0/aresetn]");
-        lines.add("connect_bd_net [get_bd_ports resetn] [get_bd_pins mm2s_demux_wr_0/rst_n]");
         lines.add("connect_bd_net [get_bd_ports resetn] [get_bd_pins mm2s_axilite_slave_wr_0/rst_n]");
 
         // =====================================================================
@@ -309,7 +263,6 @@ public class MM2SNOCChannel implements RapidComponent {
         lines.add("validate_bd_design");
         lines.add("save_bd_design");
         lines.add("set bd_file [get_files " + bdName + ".bd]");
-        lines.add("set_property synth_checkpoint_mode None $bd_file");
         lines.add("generate_target all $bd_file");
         lines.add("make_wrapper -files $bd_file -top");
         lines.add("set wrapper_file [file normalize [file dirname $bd_file]/hdl/" + bdName + "_wrapper.v]");
@@ -343,20 +296,16 @@ public class MM2SNOCChannel implements RapidComponent {
     @Override
     public Map<EDIFPort, PBlockSide> getSideMap(Design d) {
         List<String> lines = new ArrayList<>();
-        // Port A — activations → input DCUs (LEFT)
+        // Port A — activations → input Edge Buffers (LEFT)
         lines.add("m_data_a.* LEFT");
-        lines.add("m_tag_a.* LEFT");
-        lines.add("m_valid_a LEFT");
-        lines.add("m_ready_a LEFT");
-        // Port B — weights → weight DCUs (BOTTOM)
+        // Port B — weights → weight Edge Buffers (BOTTOM)
         lines.add("m_data_b.* BOTTOM");
-        lines.add("m_tag_b.* BOTTOM");
-        lines.add("m_valid_b BOTTOM");
-        lines.add("m_ready_b BOTTOM");
-        // FSM outputs (BOTTOM)
-        lines.add("a_rd_en LEFT");
-        lines.add("b_rd_en BOTTOM");
-        lines.add("output_wr_en BOTTOM");
+        // m_valid_a / m_valid_b are registered inside valid_demux_0, so we
+        // don't add an InlineFlopTools register on top — that would
+        // double-register them and misalign with the data inline flops.
+        // FSM outputs (BOTTOM).
+        // a_rd_en / b_rd_en / output_wr_en are registered inside valid_demux_0
+        // so we don't add an InlineFlopTools register on top of them.
         lines.add("sa_accum_shift BOTTOM");
         lines.add("done BOTTOM");
         lines.add("s2mm_start BOTTOM");

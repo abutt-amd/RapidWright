@@ -33,7 +33,6 @@ import com.xilinx.rapidwright.design.SiteInst;
 import com.xilinx.rapidwright.design.tools.ArrayBuilder;
 import com.xilinx.rapidwright.design.tools.ArrayBuilderConfig;
 import com.xilinx.rapidwright.design.tools.FlopTreeTools;
-import com.xilinx.rapidwright.design.tools.RegisterInitTools;
 import com.xilinx.rapidwright.device.Part;
 import com.xilinx.rapidwright.device.PartNameTools;
 import com.xilinx.rapidwright.device.Site;
@@ -44,13 +43,11 @@ import com.xilinx.rapidwright.edif.EDIFHierPortInst;
 import com.xilinx.rapidwright.edif.EDIFNetlist;
 import com.xilinx.rapidwright.edif.EDIFTools;
 import com.xilinx.rapidwright.rapidsa.components.DrainTile;
+import com.xilinx.rapidwright.rapidsa.components.EdgeBufferTile;
 import com.xilinx.rapidwright.rapidsa.components.GEMMTile;
-import com.xilinx.rapidwright.rapidsa.components.InputDCUTile;
 import com.xilinx.rapidwright.rapidsa.components.MM2SNOCChannel;
 import com.xilinx.rapidwright.rapidsa.components.RapidComponent;
 import com.xilinx.rapidwright.rapidsa.components.S2MMNOCChannel;
-import com.xilinx.rapidwright.rapidsa.components.SAControlFSM;
-import com.xilinx.rapidwright.rapidsa.components.WeightDCUTile;
 import com.xilinx.rapidwright.util.Pair;
 import joptsimple.OptionParser;
 
@@ -97,6 +94,7 @@ public class RapidSA {
         Design sa = RapidSANetlistBuilder.createSystolicArrayNetlist(8, 8, partName, "RapidSA");
 
         sa.getNetlist().exportEDIF("test.edf");
+        sa.writeCheckpoint("blackbox_netlist.dcp");
 
         GEMMTile tile = new GEMMTile(4, 4);
 
@@ -119,13 +117,13 @@ public class RapidSA {
 
         ab.createArray();
 
-        // Place WeightDCU tiles above the array
-        Module weightDcuModule = loadRelocatableModule("RapidSA", new WeightDCUTile(8), ab.getArray());
-        placeWeightDCUTiles(ab, 8, weightDcuModule);
+        // Place Weight Edge Buffer tiles above the array
+        Module weightEbModule = loadRelocatableModule("RapidSA", new EdgeBufferTile(8, EdgeBufferTile.Type.WEIGHT), ab.getArray());
+        placeWeightDCUTiles(ab, 8, weightEbModule);
 
-        // Place InputDCU tiles right of the array
-        Module inputDcuModule = loadRelocatableModule("RapidSA", new InputDCUTile(8), ab.getArray());
-        placeInputDCUTiles(ab, 8, inputDcuModule);
+        // Place Input Edge Buffer tiles right of the array
+        Module inputEbModule = loadRelocatableModule("RapidSA", new EdgeBufferTile(8, EdgeBufferTile.Type.INPUT), ab.getArray());
+        placeInputDCUTiles(ab, 8, inputEbModule);
 
         // Place DrainTiles below the array
         int accumCount = 4 * 4; // nCols * nRows for GEMM tile accumulator count
@@ -143,20 +141,33 @@ public class RapidSA {
         Design arrayDesign = ab.getArray();
 
         // Update registers before flattening (deep hierarchy won't survive flatten)
-        MM2SNOCChannel.setMatrixHeight(arrayDesign, "mm2s", 8);
-        MM2SNOCChannel.setMatrixWidth(arrayDesign, "mm2s", 8);
-
-        // Update FSM registers (FSM is inside MM2S BD)
-        String fsmPrefix = "mm2s/mm2s_channel_i/sa_fsm_0/inst/inst";
-        SAControlFSM.setSAWidth(arrayDesign, fsmPrefix, 8);
-        SAControlFSM.setSAHeight(arrayDesign, fsmPrefix, 8);
-        SAControlFSM.setKDim(arrayDesign, fsmPrefix, 8);
-        int flopTreeDepth = 6;
-        SAControlFSM.setAccumShiftPipelineLatency(arrayDesign, fsmPrefix, flopTreeDepth);
-        SAControlFSM.setOutputWrPipelineLatency(arrayDesign, fsmPrefix, flopTreeDepth);
+        // Set byte lane registers for Edge Buffer tiles
         int unitsPerTile = 4;
-        int dcuChainLatency = 3 * Math.max(8 / unitsPerTile, 8 / unitsPerTile) + 4;
-        SAControlFSM.setDcuChainLatency(arrayDesign, fsmPrefix, dcuChainLatency);
+        for (int col = 0; col < 8; col++) {
+            int colOffset = col * unitsPerTile;
+            for (int u = 0; u < unitsPerTile; u++) {
+                EdgeBufferTile.setByteLane(arrayDesign, "weight_eb_x" + col, u, (colOffset + u) % 16);
+                EdgeBufferTile.setWordIndex(arrayDesign, "weight_eb_x" + col, u, (colOffset + u) / 16);
+            }
+        }
+        for (int row = 0; row < 8; row++) {
+            int rowOffset = row * unitsPerTile;
+            for (int u = 0; u < unitsPerTile; u++) {
+                EdgeBufferTile.setByteLane(arrayDesign, "input_eb_y" + row, u, (rowOffset + u) % 16);
+                EdgeBufferTile.setWordIndex(arrayDesign, "input_eb_y" + row, u, (rowOffset + u) / 16);
+            }
+        }
+
+        // Update FSM registers
+        // TODO: uncomment after verifying hierarchy paths in Vivado
+//        String fsmPrefix = "mm2s/mm2s_channel_i/sa_fsm_0/inst/inst";
+//        SAControlFSM.setSAWidth(arrayDesign, fsmPrefix, 8);
+//        SAControlFSM.setSAHeight(arrayDesign, fsmPrefix, 8);
+//        SAControlFSM.setKDim(arrayDesign, fsmPrefix, 8);
+//        SAControlFSM.setAccumShiftPipelineLatency(arrayDesign, fsmPrefix, flopTreeDepth);
+//        SAControlFSM.setOutputWrPipelineLatency(arrayDesign, fsmPrefix, flopTreeDepth);
+//        SAControlFSM.setDcuChainLatency(arrayDesign, fsmPrefix, dcuChainLatency);
+        int flopTreeDepth = 6;
 
         arrayDesign.flattenDesign();
         EDIFTools.uniqueifyNetlist(arrayDesign);
@@ -184,6 +195,7 @@ public class RapidSA {
         }
         FlopTreeTools.insertFlopChain(arrayDesign, s2mmDoneNet, "clk", 3,
                 s2mmDoneRemoteSinks, chainSiteInsts);
+
         for (SiteInst si : chainSiteInsts) {
             si.routeSite();
         }
@@ -256,7 +268,7 @@ public class RapidSA {
 
         for (int col = 0; col < nCols; col++) {
             Site targetCentroid = centroidMap.get(new Pair<>(col, 0));
-            String instName = "weight_dcu_x" + col;
+            String instName = "weight_eb_x" + col;
 
             ModuleInst mi = arrayDesign.createModuleInst(instName, dcuModule);
 
@@ -301,12 +313,7 @@ public class RapidSA {
             placedBoundingBoxes.add(moduleBoundingBox
                     .getCorresponding(bestAnchor.getTile(), dcuModule.getAnchor().getTile()));
 
-            // Set id_reg init value so unit IDs don't overlap across tiles
-            int idValue = col * DCU_UNITS_PER_TILE;
-            RegisterInitTools.setRegisterValue(arrayDesign, instName + "/id_reg_reg", idValue, ID_WIDTH);
-
-            System.out.println("  ** PLACED WeightDCU: " + instName + " at " + bestAnchor
-                    + " (id_reg=" + idValue + ")");
+            System.out.println("  ** PLACED WeightEB: " + instName + " at " + bestAnchor);
         }
     }
 
@@ -404,21 +411,42 @@ public class RapidSA {
         RelocatableTileRectangle moduleBoundingBox = dcuModule.getBoundingBox();
         List<RelocatableTileRectangle> placedBoundingBoxes = new ArrayList<>();
 
+        // Seed with bounding boxes from all already-placed ModuleInsts (weight EBs, etc.)
+        for (ModuleInst existingMi : arrayDesign.getModuleInsts()) {
+            if (existingMi.isPlaced()) {
+                Module mod = existingMi.getModule();
+                placedBoundingBoxes.add(mod.getBoundingBox()
+                        .getCorresponding(existingMi.getPlacement().getTile(), mod.getAnchor().getTile()));
+            }
+        }
+
         // Find number of columns from centroid map
         int nCols = 0;
         for (Pair<Integer, Integer> key : centroidMap.keySet()) {
             nCols = Math.max(nCols, key.getFirst() + 1);
         }
 
-        // Compute the array's rightmost column from all placed sites
+        // Compute the array's rightmost column from GEMM tile centroids only
+        // (not from weight EBs or other modules placed above/below)
         int arrayRightCol = Integer.MIN_VALUE;
-        for (SiteInst si : arrayDesign.getSiteInsts()) {
-            arrayRightCol = Math.max(arrayRightCol, si.getTile().getColumn());
+        for (Site s : centroidMap.values()) {
+            arrayRightCol = Math.max(arrayRightCol, s.getTile().getColumn());
         }
 
-        for (int row = 0; row < nRows; row++) {
+        // Build occupied tiles set for site-level conflict checking
+        Set<Tile> occupiedTiles = new HashSet<>();
+        for (SiteInst si : arrayDesign.getSiteInsts()) {
+            occupiedTiles.add(si.getTile());
+        }
+
+        // Compute the row offset from the module anchor to the module's centroid
+        int anchorRow = dcuModule.getAnchor().getTile().getRow();
+        int bbCenterRow = (moduleBoundingBox.getMinRow() + moduleBoundingBox.getMaxRow()) / 2;
+        int anchorToCentroidRowOffset = bbCenterRow - anchorRow;
+
+        for (int row = nRows - 1; row >= 0; row--) {
             Site targetCentroid = centroidMap.get(new Pair<>(nCols - 1, row));
-            String instName = "input_dcu_y" + row;
+            String instName = "input_eb_y" + row;
 
             ModuleInst mi = arrayDesign.createModuleInst(instName, dcuModule);
 
@@ -429,7 +457,7 @@ public class RapidSA {
                 RelocatableTileRectangle candidateBB = moduleBoundingBox
                         .getCorresponding(anchor.getTile(), dcuModule.getAnchor().getTile());
 
-                // Left edge of DCU bounding box must be right of array
+                // Left edge must be right of GEMM array
                 if (candidateBB.getMinColumn() <= arrayRightCol) {
                     continue;
                 }
@@ -444,8 +472,21 @@ public class RapidSA {
                 }
                 if (overlaps) continue;
 
+                // Check site-level conflicts with occupied tiles
+                boolean siteConflict = false;
+                for (SiteInst modSi : dcuModule.getSiteInsts()) {
+                    Site newSite = dcuModule.getCorrespondingSite(modSi, anchor);
+                    if (newSite != null && occupiedTiles.contains(newSite.getTile())) {
+                        siteConflict = true;
+                        break;
+                    }
+                }
+                if (siteConflict) continue;
+
+                // Use module centroid (not anchor) for distance calculation
+                int moduleCentroidRow = anchor.getTile().getRow() + anchorToCentroidRowOffset;
                 int dist = Math.abs(anchor.getTile().getColumn() - targetCentroid.getTile().getColumn())
-                         + Math.abs(anchor.getTile().getRow() - targetCentroid.getTile().getRow());
+                         + Math.abs(moduleCentroidRow - targetCentroid.getTile().getRow());
                 if (dist < bestDist) {
                     bestDist = dist;
                     bestAnchor = anchor;
@@ -463,12 +504,20 @@ public class RapidSA {
             placedBoundingBoxes.add(moduleBoundingBox
                     .getCorresponding(bestAnchor.getTile(), dcuModule.getAnchor().getTile()));
 
-            // Set id_reg init value so unit IDs don't overlap across tiles
-            int idValue = row * DCU_UNITS_PER_TILE;
-            RegisterInitTools.setRegisterValue(arrayDesign, instName + "/id_reg_reg", idValue, ID_WIDTH);
+            // Add newly placed sites to occupied set for subsequent iterations
+            for (SiteInst modSi : dcuModule.getSiteInsts()) {
+                Site newSite = dcuModule.getCorrespondingSite(modSi, bestAnchor);
+                if (newSite != null) {
+                    occupiedTiles.add(newSite.getTile());
+                }
+            }
 
-            System.out.println("  ** PLACED InputDCU: " + instName + " at " + bestAnchor
-                    + " (id_reg=" + idValue + ")");
+            System.out.println("  ** PLACED InputEB: " + instName + " at " + bestAnchor);
+
+            if (row == nRows - 1) {
+                System.out.println("  >> GEMM bottom-row centroid row: " + targetCentroid.getTile().getRow()
+                        + "  |  input_eb_y" + row + " placed row: " + bestAnchor.getTile().getRow());
+            }
         }
     }
 

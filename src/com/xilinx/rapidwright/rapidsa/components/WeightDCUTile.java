@@ -69,7 +69,6 @@ public class WeightDCUTile implements RapidComponent {
         lines.add("read_verilog -sv " + rtlPath + "fifo.sv");
         lines.add("read_verilog -sv " + rtlPath + "fifo_tile.sv");
         lines.add("read_verilog -sv " + rtlPath + "skid_buffer.sv");
-        lines.add("read_verilog -sv " + rtlPath + "daisy_chain_loader.sv");
         lines.add("read_verilog -sv " + rtlPath + "dcu_fifo_tile_weight.sv");
         lines.add("set_property generic {NUM_UNITS=" + width + " } [current_fileset]");
         lines.add("set_property top dcu_fifo_tile_weight [current_fileset]");
@@ -90,7 +89,7 @@ public class WeightDCUTile implements RapidComponent {
     public PBlock getPBlock() {
         Device device = Device.getDevice("xcv80-lsva4737-2MHP-e-S");
         return new PBlock(device,
-                "DSP_X0Y444:DSP_X1Y447 SLICE_X84Y888:SLICE_X99Y895 " +
+                "DSP_X0Y444:DSP_X1Y447 SLICE_X84Y888:SLICE_X103Y895 " +
                         "IRI_QUAD_X58Y3580:IRI_QUAD_X59Y3611 DSP58_CPLX_X0Y444:DSP58_CPLX_X0Y447");
     }
 
