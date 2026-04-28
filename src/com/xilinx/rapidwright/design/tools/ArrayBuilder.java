@@ -128,6 +128,17 @@ public class ArrayBuilder {
 
     private Map<Pair<Integer, Integer>, Site> logicalToCentroidMap;
 
+    private Map<String, Pair<EDIFCellInst, String>> mergedTileMap;
+
+    /**
+     * Bounding boxes of all GEMM tile and SLR-crossing module instances placed by
+     * {@link #placeModuleInstancesAutomatically}. Retained here because
+     * {@link #createArray()} calls {@code array.flattenDesign()} after placement,
+     * which collapses the corresponding {@code ModuleInst}s and makes
+     * {@code array.getModuleInsts()} no longer expose them.
+     */
+    private List<RelocatableTileRectangle> placedArrayBoundingBoxes;
+
     private List<Module> modules;
 
     private Module slrCrossingModule;
@@ -139,6 +150,8 @@ public class ArrayBuilder {
     public ArrayBuilder(ArrayBuilderConfig config) {
         newPlacementMap = new HashMap<>();
         logicalToCentroidMap = new HashMap<>();
+        mergedTileMap = new HashMap<>();
+        placedArrayBoundingBoxes = new ArrayList<>();
         modInstNames = new ArrayList<>();
         modules = new ArrayList<>();
         this.config = config;
@@ -211,6 +224,27 @@ public class ArrayBuilder {
 
     public Map<Pair<Integer, Integer>, Site> getLogicalToCentroidMap() {
         return logicalToCentroidMap;
+    }
+
+    /**
+     * Returns a map from each original tile instance name that was merged into an
+     * SLR-crossing module to a pair of (the merged cell instance, port-name prefix).
+     * The prefix is the SLR-crossing wrapper's top/bottom inst name plus an
+     * underscore (e.g. "slr_crossing_top_"), to be prepended to the original
+     * tile port name when wiring nets to the merged cell.
+     */
+    public Map<String, Pair<EDIFCellInst, String>> getMergedTileMap() {
+        return mergedTileMap;
+    }
+
+    /**
+     * Bounding boxes of all GEMM tile and SLR-crossing module instances that were
+     * placed during {@link #createArray()}. Use this from downstream placement
+     * passes (e.g. peripheral edge buffers) instead of {@code Design.getModuleInsts()},
+     * which loses these entries after the post-placement {@code flattenDesign()}.
+     */
+    public List<RelocatableTileRectangle> getPlacedArrayBoundingBoxes() {
+        return placedArrayBoundingBoxes;
     }
 
     private Site getModuleInstCentroid(ModuleInst mi) {
@@ -570,8 +604,60 @@ public class ArrayBuilder {
             removeBUFGs(slrCrossing);
             slrCrossingModule = new Module(slrCrossing);
             slrCrossingModule.calculateAllValidPlacements(getDevice());
+            debugPrintSlrCrossingBboxExtent(slrCrossingModule, slrCrossing);
         }
         return idealPlacement;
+    }
+
+    /**
+     * Prints the SLR-crossing Module's reported bounding box alongside the
+     * actual extent of its placed SiteInsts and routed PIPs so we can see
+     * whether {@link Module#getBoundingBox()} is undersized relative to the
+     * tiles the module actually touches.
+     */
+    private static void debugPrintSlrCrossingBboxExtent(Module mod, Design slrCrossingDesign) {
+        com.xilinx.rapidwright.design.RelocatableTileRectangle modBb = mod.getBoundingBox();
+        System.out.println("[SLR-CROSSING BBOX] Module.getBoundingBox(): "
+                + " minCol=" + modBb.getMinColumn() + " maxCol=" + modBb.getMaxColumn()
+                + " minRow=" + modBb.getMinRow() + " maxRow=" + modBb.getMaxRow());
+
+        int siMinCol = Integer.MAX_VALUE, siMaxCol = Integer.MIN_VALUE;
+        int siMinRow = Integer.MAX_VALUE, siMaxRow = Integer.MIN_VALUE;
+        int siCount = 0;
+        for (SiteInst si : slrCrossingDesign.getSiteInsts()) {
+            Tile t = si.getTile();
+            if (t == null) continue;
+            siCount++;
+            siMinCol = Math.min(siMinCol, t.getColumn());
+            siMaxCol = Math.max(siMaxCol, t.getColumn());
+            siMinRow = Math.min(siMinRow, t.getRow());
+            siMaxRow = Math.max(siMaxRow, t.getRow());
+        }
+        System.out.println("[SLR-CROSSING BBOX] Actual SiteInsts (" + siCount + "):"
+                + " minCol=" + siMinCol + " maxCol=" + siMaxCol
+                + " minRow=" + siMinRow + " maxRow=" + siMaxRow);
+
+        int pipMinCol = Integer.MAX_VALUE, pipMaxCol = Integer.MIN_VALUE;
+        int pipMinRow = Integer.MAX_VALUE, pipMaxRow = Integer.MIN_VALUE;
+        int pipCount = 0;
+        for (Net n : slrCrossingDesign.getNets()) {
+            for (com.xilinx.rapidwright.device.PIP pip : n.getPIPs()) {
+                Tile t = pip.getTile();
+                if (t == null) continue;
+                pipCount++;
+                pipMinCol = Math.min(pipMinCol, t.getColumn());
+                pipMaxCol = Math.max(pipMaxCol, t.getColumn());
+                pipMinRow = Math.min(pipMinRow, t.getRow());
+                pipMaxRow = Math.max(pipMaxRow, t.getRow());
+            }
+        }
+        if (pipCount > 0) {
+            System.out.println("[SLR-CROSSING BBOX] Routed PIPs (" + pipCount + " across all nets):"
+                    + " minCol=" + pipMinCol + " maxCol=" + pipMaxCol
+                    + " minRow=" + pipMinRow + " maxRow=" + pipMaxRow);
+        } else {
+            System.out.println("[SLR-CROSSING BBOX] Routed PIPs: 0 (design has no routing PIPs)");
+        }
     }
 
     private void placeInstancesWithManualPlacementFile() {
@@ -791,17 +877,40 @@ public class ArrayBuilder {
                             String bottomInst = idealPlacement.getInstanceAtLocation(x, y+1);
                             EDIFHierCellInst mergedCellInst = mergeBlackBoxCells(instToPlace, bottomInst,
                                     config.getSlrCrossingTopInstName(), config.getSlrCrossingBottomInstName());
+                            EDIFCellInst mergedInst = mergedCellInst.getInst();
+                            mergedTileMap.put(instToPlace,
+                                    new Pair<>(mergedInst, config.getSlrCrossingTopInstName() + "_"));
+                            mergedTileMap.put(bottomInst,
+                                    new Pair<>(mergedInst, config.getSlrCrossingBottomInstName() + "_"));
                             ModuleInst curr = array.createModuleInst(mergedCellInst.getFullHierarchicalInstName(), slrCrossingModule);
-                            Site slrCrossingAnchor = slrCrossingPlacementGrid.get(anchor.getTile().getSLR()).get(x);
+                            List<Site> slrCrossingSites = slrCrossingPlacementGrid.get(anchor.getTile().getSLR());
+                            int slrCrossingIdx = config.isFlipPlacementHorizontally()
+                                    ? slrCrossingSites.size() - 1 - x - config.getColumnOffset()
+                                    : x + config.getColumnOffset();
+                            Site slrCrossingAnchor = slrCrossingSites.get(slrCrossingIdx);
                             RelocatableTileRectangle slrCrossingBoundingBox = slrCrossingModule.getBoundingBox()
                                     .getCorresponding(slrCrossingAnchor.getTile(), slrCrossingModule.getAnchor().getTile());
                             if (curr.place(slrCrossingAnchor, false, false)) {
                                 placed = true;
                                 boundingBoxes.add(newBoundingBox);
                                 newPlacementMap.put(curr, anchor);
-                                Site centroid = getModuleInstCentroid(curr);
-                                logicalToCentroidMap.put(new Pair<>(x, y), centroid);
-                                logicalToCentroidMap.put(new Pair<>(x, y + 1), centroid);
+                                // Split the SLR-crossing module's SiteInsts by SLR and compute
+                                // a centroid per half so logical y and y+1 each map to the
+                                // centroid of the half that physically belongs to them.
+                                Map<SLR, List<Point>> halfPoints = new HashMap<>();
+                                for (SiteInst si : curr.getSiteInsts()) {
+                                    Tile t = si.getTile();
+                                    halfPoints.computeIfAbsent(t.getSLR(), k -> new ArrayList<>())
+                                            .add(new Point(t.getColumn(), t.getRow()));
+                                }
+                                List<Site> halfCentroids = new ArrayList<>();
+                                for (List<Point> pts : halfPoints.values()) {
+                                    halfCentroids.add(ECOPlacementHelper.getCentroidOfPoints(
+                                            array.getDevice(), pts, VALID_CENTROID_SITE_TYPES));
+                                }
+                                halfCentroids.sort(Comparator.comparingInt(s -> s.getTile().getRow()));
+                                logicalToCentroidMap.put(new Pair<>(x, y), halfCentroids.get(0));
+                                logicalToCentroidMap.put(new Pair<>(x, y + 1), halfCentroids.get(1));
                                 System.out.println("  ** PLACED: " + numPlaced + " " + anchor + " " + curr.getName()
                                         + " " + curr.getAnchor().getTile().getSLR());
                                 numPlaced += 2;
@@ -852,6 +961,38 @@ public class ArrayBuilder {
                         }
                     }
                 }
+            }
+        }
+
+        // Retain the placement-time bounding boxes so downstream placement passes
+        // can still see GEMM tile and SLR-crossing footprints after createArray()'s
+        // flattenDesign() collapses the corresponding ModuleInsts.
+        placedArrayBoundingBoxes.addAll(boundingBoxes);
+
+        // Diagnostic: report the rightmost placed SLR-crossing module's bbox so
+        // we can confirm getCorresponding() relocates the bbox to the correct tiles.
+        if (slrCrossingModule != null) {
+            ModuleInst rightmost = null;
+            for (ModuleInst mi : array.getModuleInsts()) {
+                if (mi.isPlaced() && mi.getModule() == slrCrossingModule) {
+                    if (rightmost == null
+                            || mi.getPlacement().getTile().getColumn()
+                                > rightmost.getPlacement().getTile().getColumn()) {
+                        rightmost = mi;
+                    }
+                }
+            }
+            if (rightmost != null) {
+                Site placedAnchor = rightmost.getPlacement();
+                RelocatableTileRectangle placedBb = slrCrossingModule.getBoundingBox()
+                        .getCorresponding(placedAnchor.getTile(),
+                                slrCrossingModule.getAnchor().getTile());
+                System.out.println("[SLR-CROSSING PLACED] rightmost inst='" + rightmost.getName()
+                        + "' anchor=" + placedAnchor
+                        + " bbox: minCol=" + placedBb.getMinColumn()
+                        + " maxCol=" + placedBb.getMaxColumn()
+                        + " minRow=" + placedBb.getMinRow()
+                        + " maxRow=" + placedBb.getMaxRow());
             }
         }
     }
@@ -1171,7 +1312,9 @@ public class ArrayBuilder {
         ab.createArray();
 
         t.stop().start("Write DCP");
-        ab.getArray().setWrite2024Dot1DCP(true);
+        // setWrite2024Dot1DCP not present in rapidwright-api-lib 2025.2.1; revisit
+        // when bumping to a newer api jar.
+        // ab.getArray().setWrite2024Dot1DCP(true);
         ab.getArray().writeCheckpoint(ArrayBuilderConfig.getOutputName(args));
         t.stop().printSummary();
     }

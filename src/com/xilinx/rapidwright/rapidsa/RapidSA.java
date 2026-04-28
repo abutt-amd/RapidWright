@@ -35,12 +35,15 @@ import com.xilinx.rapidwright.design.tools.ArrayBuilderConfig;
 import com.xilinx.rapidwright.design.tools.FlopTreeTools;
 import com.xilinx.rapidwright.device.Part;
 import com.xilinx.rapidwright.device.PartNameTools;
+import com.xilinx.rapidwright.device.SLR;
 import com.xilinx.rapidwright.device.Site;
 import com.xilinx.rapidwright.device.Tile;
 import com.xilinx.rapidwright.edif.EDIFCell;
 import com.xilinx.rapidwright.edif.EDIFCellInst;
 import com.xilinx.rapidwright.edif.EDIFHierPortInst;
+import com.xilinx.rapidwright.edif.EDIFNet;
 import com.xilinx.rapidwright.edif.EDIFNetlist;
+import com.xilinx.rapidwright.edif.EDIFPortInst;
 import com.xilinx.rapidwright.edif.EDIFTools;
 import com.xilinx.rapidwright.rapidsa.components.DrainTile;
 import com.xilinx.rapidwright.rapidsa.components.EdgeBufferTile;
@@ -48,15 +51,22 @@ import com.xilinx.rapidwright.rapidsa.components.GEMMTile;
 import com.xilinx.rapidwright.rapidsa.components.MM2SNOCChannel;
 import com.xilinx.rapidwright.rapidsa.components.RapidComponent;
 import com.xilinx.rapidwright.rapidsa.components.S2MMNOCChannel;
+import com.xilinx.rapidwright.rwroute.HoldFixer;
+import com.xilinx.rapidwright.rwroute.PartialRouter;
 import com.xilinx.rapidwright.util.Pair;
+import com.xilinx.rapidwright.util.VivadoTools;
 import joptsimple.OptionParser;
 
 import java.io.File;
+import java.nio.file.Path;
+import java.nio.file.Paths;
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.TreeMap;
 
 public class RapidSA {
     private static final int ID_WIDTH = 8;
@@ -68,6 +78,17 @@ public class RapidSA {
 
         OptionParser parser = new OptionParser();
         parser.accepts("precompile", "Run precompilation of all RapidSA components and exit");
+        parser.accepts("precompile-slr-crossings-only", "Generate only SLR crossing artifacts for applicable precompiled RapidSA components and exit");
+        parser.accepts("rows", "Number of GEMM tile rows in the systolic array").withRequiredArg().ofType(Integer.class).defaultsTo(8);
+        parser.accepts("cols", "Number of GEMM tile columns in the systolic array").withRequiredArg().ofType(Integer.class).defaultsTo(8);
+        parser.accepts("route", "After building the array, run RWRoute partial route + HoldFixer in-process and write a routed DCP");
+        parser.accepts("vivado-route", "After building the array, shell out to Vivado to route the design and write a routed DCP");
+        parser.accepts("lsf-route", "After building the array, submit RWRoute partial route + HoldFixer as an LSF (bsub) job and wait for it to complete; useful when the local host doesn't have enough RAM");
+        parser.accepts("lsf-bsub-opts", "Override the default bsub options used by --lsf-route (defaults to '-n 4 -R \"rusage[mem=64000]\" -W 6:00')").withRequiredArg().ofType(String.class);
+        parser.accepts("report-timing", "After routing, open the routed DCP in Vivado and run report_timing_summary + report_timing -nworst 10. Combined with --vivado-route in a single Vivado session.");
+        parser.accepts("flop-tree-depth", "Flop tree depth for control fanout (default: scales with array size)").withRequiredArg().ofType(Integer.class);
+        parser.accepts("max-depth-per-slr", "Max flop tree depth within a single SLR (default: scales with flop-tree-depth)").withRequiredArg().ofType(Integer.class);
+        parser.accepts("handshake-chain-depth", "Flop chain depth for s2mm_start/s2mm_done handshake nets that span the full array (default: scales with nRows)").withRequiredArg().ofType(Integer.class);
         parser.accepts("help", "Print help message");
         joptsimple.OptionSet options = parser.parse(args);
 
@@ -86,12 +107,20 @@ public class RapidSA {
 //        if (true)
 //        return;
 
+        if (options.has("precompile-slr-crossings-only")) {
+            RapidSAPrecompile.precompileRapidSAComponents("RapidSA", part, 2.0, true);
+            return;
+        }
+
         if (options.has("precompile")) {
             RapidSAPrecompile.precompileRapidSAComponents("RapidSA", part, 2.0);
             return;
         }
 
-        Design sa = RapidSANetlistBuilder.createSystolicArrayNetlist(8, 8, partName, "RapidSA");
+        int nRows = (Integer) options.valueOf("rows");
+        int nCols = (Integer) options.valueOf("cols");
+
+        Design sa = RapidSANetlistBuilder.createSystolicArrayNetlist(nRows, nCols, partName, "RapidSA");
 
         sa.getNetlist().exportEDIF("test.edf");
         sa.writeCheckpoint("blackbox_netlist.dcp");
@@ -111,6 +140,24 @@ public class RapidSA {
         config.setRowOffset(5);
         config.setColumnOffset(1);
 
+        String slrCrossingDir = compOutputDir + File.separator + RapidSAPrecompile.SLR_CROSSING_RUN_DIR;
+        File slrCrossingDcp = new File(slrCrossingDir + File.separator + RapidSAPrecompile.SLR_CROSSING_DCP_NAME);
+        File slrCrossingSynthDcp = new File(slrCrossingDir + File.separator + RapidSAPrecompile.SLR_CROSSING_SYNTH_DCP_NAME);
+        if (slrCrossingDcp.exists() && slrCrossingSynthDcp.exists()) {
+            Design slrCrossing = Design.readCheckpoint(slrCrossingDcp.getPath());
+            EDIFTools.removeVivadoBusPreventionAnnotations(slrCrossing.getNetlist());
+            Design slrCrossingSynth = Design.readCheckpoint(slrCrossingSynthDcp.getPath());
+            EDIFTools.removeVivadoBusPreventionAnnotations(slrCrossingSynth.getNetlist());
+            config.setSlrCrossing(slrCrossing);
+            config.setSlrCrossingSynth(slrCrossingSynth);
+            config.setSlrCrossingTopInstName(RapidSAPrecompile.SLR_CROSSING_TOP_INST_NAME);
+            config.setSlrCrossingBottomInstName(RapidSAPrecompile.SLR_CROSSING_BOTTOM_INST_NAME);
+            System.out.println("  ** Using precompiled GEMM SLR crossing from " + slrCrossingDir);
+        } else {
+            System.out.println("  ** No precompiled GEMM SLR crossing found at " + slrCrossingDir
+                    + " (array will fail if it crosses SLRs)");
+        }
+
         // Create array builder with config
         ArrayBuilder ab = new ArrayBuilder(config);
         ab.initializeArrayBuilder();
@@ -119,38 +166,83 @@ public class RapidSA {
 
         // Place Weight Edge Buffer tiles above the array
         Module weightEbModule = loadRelocatableModule("RapidSA", new EdgeBufferTile(8, EdgeBufferTile.Type.WEIGHT), ab.getArray());
-        placeWeightDCUTiles(ab, 8, weightEbModule);
+        placeWeightDCUTiles(ab, nCols, weightEbModule);
 
         // Place Input Edge Buffer tiles right of the array
         Module inputEbModule = loadRelocatableModule("RapidSA", new EdgeBufferTile(8, EdgeBufferTile.Type.INPUT), ab.getArray());
-        placeInputDCUTiles(ab, 8, inputEbModule);
+        placeInputDCUTiles(ab, nRows, inputEbModule);
 
         // Place DrainTiles below the array
         int accumCount = 4 * 4; // nCols * nRows for GEMM tile accumulator count
         Module drainModule = loadRelocatableModule("RapidSA", new DrainTile(accumCount, 8), ab.getArray());
-        placeDrainTiles(ab, 8, drainModule, accumCount);
-
-        // Place MM2S NOC channel at the top-right of the array
-        Module mm2sModule = loadRelocatableModule("RapidSA", new MM2SNOCChannel(), ab.getArray());
-        placeMM2SNOCChannel(ab, mm2sModule);
-
-        // Place S2MM channel at the top-right of the array
-        Module s2mmModule = loadRelocatableModule("RapidSA", new S2MMNOCChannel(), ab.getArray());
-        placeS2MMChannel(ab, s2mmModule);
+        placeDrainTiles(ab, nCols, drainModule, accumCount);
 
         Design arrayDesign = ab.getArray();
+
+        String[] inputEbRoots = computeFirstEbPerSLR(arrayDesign, "input_eb_y", nRows);
+        String[] weightEbRoots = computeFirstEbPerSLR(arrayDesign, "weight_eb_x", nCols);
+
+        RapidSANetlistBuilder.attachS2MMNOCChannel(arrayDesign, "RapidSA", "s2mm", "drain_x0");
+        // Primary MM2S in SLR 0 drives weight EBs, accum_shift, output_wr_en, done,
+        // s2mm handshake, AND only the SLR 0 input EB root.
+        RapidSANetlistBuilder.attachMM2SNOCChannel(arrayDesign, "RapidSA", "mm2s",
+                createTileInstanceNames(nRows, nCols),
+                weightEbRoots,
+                new String[]{inputEbRoots[0]},
+                createIndexedInstanceNames("drain_x", nCols),
+                "done",
+                ab.getMergedTileMap());
+        RapidSANetlistBuilder.connectIngressEgressChannelHandshake(arrayDesign, "mm2s", "s2mm");
+        // One additional input-EB-only MM2S per remaining SLR root.
+        for (int i = 1; i < inputEbRoots.length; i++) {
+            RapidSANetlistBuilder.attachSecondaryInputMM2SNOCChannel(arrayDesign, "RapidSA",
+                    "mm2s_" + i, inputEbRoots[i]);
+        }
+
+        // Snapshot the fully wired black-box netlist (GEMM tiles + EBs + drains
+        // are placed by createArray, but MM2S/S2MM/secondary MM2S have just been
+        // added as wired black boxes and aren't yet placed). Useful for inspecting
+        // the netlist topology before peripheral placement / flatten / flop-tree.
+        arrayDesign.writeCheckpoint("wired_blackbox_netlist.dcp");
+        System.out.println("** Wrote wired_blackbox_netlist.dcp (post-attach, pre-placement)");
+
+        // Look up the SLR each input EB root landed in, so we can place the
+        // secondary MM2S(es) in the same SLR as the EB they drive.
+        SLR[] inputEbRootSLRs = new SLR[inputEbRoots.length];
+        for (int i = 0; i < inputEbRoots.length; i++) {
+            for (ModuleInst mi : arrayDesign.getModuleInsts()) {
+                if (mi.getName().equals(inputEbRoots[i]) && mi.isPlaced()) {
+                    inputEbRootSLRs[i] = mi.getPlacement().getTile().getSLR();
+                    break;
+                }
+            }
+            System.out.println("[MM2S-PLACE] inputEbRoots[" + i + "]=" + inputEbRoots[i]
+                    + " landed in SLR id=" + (inputEbRootSLRs[i] == null ? "NULL" : inputEbRootSLRs[i].getId()));
+        }
+
+        // Place primary MM2S NOC channel at the top-right of the array
+        Module mm2sModule = loadRelocatableModule("RapidSA", new MM2SNOCChannel(), arrayDesign);
+        placeMM2SNOCChannel(ab, mm2sModule);
+        // Place each secondary MM2S at the top-right of its SLR
+        for (int i = 1; i < inputEbRoots.length; i++) {
+            placeMM2SNOCChannelInSLR(ab, mm2sModule, "mm2s_" + i, inputEbRootSLRs[i]);
+        }
+
+        // Place S2MM channel at the top-right of the array
+        Module s2mmModule = loadRelocatableModule("RapidSA", new S2MMNOCChannel(), arrayDesign);
+        placeS2MMChannel(ab, s2mmModule);
 
         // Update registers before flattening (deep hierarchy won't survive flatten)
         // Set byte lane registers for Edge Buffer tiles
         int unitsPerTile = 4;
-        for (int col = 0; col < 8; col++) {
+        for (int col = 0; col < nCols; col++) {
             int colOffset = col * unitsPerTile;
             for (int u = 0; u < unitsPerTile; u++) {
                 EdgeBufferTile.setByteLane(arrayDesign, "weight_eb_x" + col, u, (colOffset + u) % 16);
                 EdgeBufferTile.setWordIndex(arrayDesign, "weight_eb_x" + col, u, (colOffset + u) / 16);
             }
         }
-        for (int row = 0; row < 8; row++) {
+        for (int row = 0; row < nRows; row++) {
             int rowOffset = row * unitsPerTile;
             for (int u = 0; u < unitsPerTile; u++) {
                 EdgeBufferTile.setByteLane(arrayDesign, "input_eb_y" + row, u, (rowOffset + u) % 16);
@@ -167,13 +259,70 @@ public class RapidSA {
 //        SAControlFSM.setAccumShiftPipelineLatency(arrayDesign, fsmPrefix, flopTreeDepth);
 //        SAControlFSM.setOutputWrPipelineLatency(arrayDesign, fsmPrefix, flopTreeDepth);
 //        SAControlFSM.setDcuChainLatency(arrayDesign, fsmPrefix, dcuChainLatency);
-        int flopTreeDepth = 6;
+        // Defaults derived from array size:
+        //   maxDepthPerSLR  = ceil(log4(totalSinks))         (logical fanout per SLR)
+        //   chainSlack      = max(3, ceil(nRows / 3))        (pacing for source<->boundary
+        //                                                     and boundary<->dest hops; one
+        //                                                     stage per ~3 array rows, so on
+        //                                                     xcv80 the source-to-boundary
+        //                                                     hop fits a per-flop span of
+        //                                                     ~40-50 tile rows).
+        //   flopTreeDepth   = maxDepthPerSLR + 2 + chainSlack (2 reserved for SLR crossing)
+        // Picking maxDepthPerSLR independently of flopTreeDepth ensures there is
+        // always a positive chain budget (flopTreeDepth - 2 - maxDepthPerSLR) that
+        // insertFlopTreeForNet can split between source-side and dest-side pacing.
+        int totalSinks = nRows * nCols;
+        int defaultMaxDepthPerSLR = Math.max(2,
+                (int) Math.ceil(Math.log(totalSinks) / Math.log(4)));
+        int chainSlack = Math.max(3, (nRows + 2) / 3);
+        int defaultFlopTreeDepth = defaultMaxDepthPerSLR + 2 + chainSlack;
+
+        int flopTreeDepth = options.has("flop-tree-depth")
+                ? (Integer) options.valueOf("flop-tree-depth")
+                : defaultFlopTreeDepth;
+        int maxDepthPerSLR = options.has("max-depth-per-slr")
+                ? (Integer) options.valueOf("max-depth-per-slr")
+                : defaultMaxDepthPerSLR;
+        int chainBudget = Math.max(0, flopTreeDepth - 2 - maxDepthPerSLR);
+        // Handshake chain (s2mm_start / s2mm_done) spans roughly the full array
+        // height (MM2S near top of array, S2MM near bottom), so it needs roughly
+        // 2x the per-half pacing. Default ~1 stage per 2 array rows, floor 5.
+        int defaultHandshakeChainDepth = Math.max(5, (nRows + 1) / 2);
+        int handshakeChainDepth = options.has("handshake-chain-depth")
+                ? (Integer) options.valueOf("handshake-chain-depth")
+                : defaultHandshakeChainDepth;
+        System.out.println("** Flop tree: depth=" + flopTreeDepth
+                + ", maxDepthPerSLR=" + maxDepthPerSLR
+                + ", chainBudget=" + chainBudget
+                + ", handshakeChainDepth=" + handshakeChainDepth
+                + " (defaults from " + nRows + "x" + nCols
+                + ": depth=" + defaultFlopTreeDepth
+                + ", maxDepthPerSLR=" + defaultMaxDepthPerSLR
+                + ", handshakeChainDepth=" + defaultHandshakeChainDepth + ")");
+
+        // Build the no-go bbox list BEFORE flatten — flattenDesign() collapses
+        // the post-flatten ModuleInsts (weight EBs, input EBs, drain tiles, MM2S,
+        // S2MM placements) so we can't query them afterward. The pre-flatten
+        // GEMM tile + SLR-crossing bboxes come from ArrayBuilder's retained list.
+        List<RelocatableTileRectangle> noGoBboxes = new ArrayList<>(ab.getPlacedArrayBoundingBoxes());
+        for (ModuleInst mi : arrayDesign.getModuleInsts()) {
+            if (mi.isPlaced()) {
+                Module mod = mi.getModule();
+                noGoBboxes.add(mod.getBoundingBox()
+                        .getCorresponding(mi.getPlacement().getTile(), mod.getAnchor().getTile()));
+            }
+        }
+        System.out.println("** Inserted-flop placement no-go list: " + noGoBboxes.size()
+                + " bboxes (placed array tiles + post-flatten ModuleInsts)");
 
         arrayDesign.flattenDesign();
         EDIFTools.uniqueifyNetlist(arrayDesign);
 
-        FlopTreeTools.insertFlopTreeForNet(arrayDesign, "sa_accum_shift", "clk", flopTreeDepth, 3);
-        FlopTreeTools.insertFlopTreeForNet(arrayDesign, "output_wr_en", "clk", flopTreeDepth, 3);
+        // TEMP DIAGNOSTIC: find which net has multiple sources
+        debugFindMultiSourceNets(arrayDesign);
+
+        FlopTreeTools.insertFlopTreeForNet(arrayDesign, "sa_accum_shift", "clk", flopTreeDepth, maxDepthPerSLR, noGoBboxes);
+        FlopTreeTools.insertFlopTreeForNet(arrayDesign, "output_wr_en", "clk", flopTreeDepth, maxDepthPerSLR, noGoBboxes);
         Set<SiteInst> chainSiteInsts = new HashSet<>();
         Net s2mmStartNet = arrayDesign.getNet("s2mm/s2mm_start");
         // Filter to only remote sinks (in s2mm, not mm2s)
@@ -183,8 +332,8 @@ public class RapidSA {
                 s2mmStartRemoteSinks.add(p);
             }
         }
-        FlopTreeTools.insertFlopChain(arrayDesign, s2mmStartNet, "clk", 3,
-                s2mmStartRemoteSinks, chainSiteInsts);
+        FlopTreeTools.insertFlopChain(arrayDesign, s2mmStartNet, "clk", handshakeChainDepth,
+                s2mmStartRemoteSinks, chainSiteInsts, noGoBboxes);
         Net s2mmDoneNet = arrayDesign.getNet("mm2s/s2mm_done");
         // Filter to only remote sinks (in mm2s, not s2mm)
         List<EDIFHierPortInst> s2mmDoneRemoteSinks = new ArrayList<>();
@@ -193,8 +342,8 @@ public class RapidSA {
                 s2mmDoneRemoteSinks.add(p);
             }
         }
-        FlopTreeTools.insertFlopChain(arrayDesign, s2mmDoneNet, "clk", 3,
-                s2mmDoneRemoteSinks, chainSiteInsts);
+        FlopTreeTools.insertFlopChain(arrayDesign, s2mmDoneNet, "clk", handshakeChainDepth,
+                s2mmDoneRemoteSinks, chainSiteInsts, noGoBboxes);
 
         for (SiteInst si : chainSiteInsts) {
             si.routeSite();
@@ -204,7 +353,249 @@ public class RapidSA {
         arrayDesign.addXDCConstraint("create_clock -period 2.0 -name clk [get_ports clk]");
 
         arrayDesign.setDesignOutOfContext(true);
-        arrayDesign.writeCheckpoint("systolic_array_8x8.dcp");
+        String baseDcpName = "systolic_array_" + nRows + "x" + nCols;
+        arrayDesign.writeCheckpoint(baseDcpName + ".dcp");
+
+        if (options.has("route")) {
+            System.out.println("** Running RWRoute partial route + HoldFixer on " + baseDcpName + ".dcp");
+            PartialRouter.routeDesignWithUserDefinedArguments(arrayDesign, new String[]{
+                    "--fixBoundingBox",
+                    "--useUTurnNodes",
+                    "--nonTimingDriven",
+            });
+            HoldFixer holdFixer = new HoldFixer(arrayDesign, "clk");
+            holdFixer.fixHoldViolations();
+            arrayDesign.writeCheckpoint(baseDcpName + "_routed.dcp");
+            System.out.println("** Wrote " + baseDcpName + "_routed.dcp");
+        }
+
+        if (options.has("vivado-route")) {
+            Path workdir = Paths.get(".").toAbsolutePath().normalize();
+            Path inputDcp = workdir.resolve(baseDcpName + ".dcp");
+            Path outputDcp = workdir.resolve(baseDcpName + "_vivado_routed.dcp");
+            Path tclLog = workdir.resolve(baseDcpName + "_vivado_route.log");
+            StringBuilder tcl = new StringBuilder()
+                    .append("open_checkpoint {").append(inputDcp).append("}; ")
+                    .append("route_design; ")
+                    .append("write_checkpoint -force {").append(outputDcp).append("}; ")
+                    .append("report_route_status; ");
+            if (options.has("report-timing")) {
+                // Same Vivado session — no need to re-load the DCP.
+                tcl.append(reportTimingTcl());
+            }
+            System.out.println("** Running Vivado route_design on " + inputDcp
+                    + (options.has("report-timing") ? " (with report-timing in same session)" : ""));
+            VivadoTools.runTcl(tclLog, tcl.toString(), true);
+            System.out.println("** Wrote " + outputDcp);
+        }
+
+        if (options.has("lsf-route")) {
+            runLsfRoute(baseDcpName, options);
+        }
+
+        // Standalone report-timing pass (skipped if --vivado-route already
+        // did it in the same session above).
+        if (options.has("report-timing") && !options.has("vivado-route")) {
+            runReportTiming(baseDcpName, options);
+        }
+    }
+
+    /**
+     * Returns the Tcl snippet that runs the timing report. Used both inline
+     * inside the --vivado-route session and from a standalone Vivado session.
+     */
+    private static String reportTimingTcl() {
+        return "puts {===== report_timing_summary =====}; "
+                + "report_timing_summary; "
+                + "puts {===== report_timing -nworst 10 (setup) =====}; "
+                + "report_timing -nworst 10 -setup; "
+                + "puts {===== report_timing -nworst 10 (hold) =====}; "
+                + "report_timing -nworst 10 -hold; ";
+    }
+
+    /**
+     * Picks the most recently-produced routed DCP (preferring vivado &gt; lsf &gt;
+     * local RWRoute &gt; unrouted) and opens it in a Vivado session to run the
+     * timing report. Output streams live so timing tables print to the terminal.
+     */
+    private static void runReportTiming(String baseDcpName, joptsimple.OptionSet options) {
+        Path workdir = Paths.get(".").toAbsolutePath().normalize();
+        // Pick the routed DCP that exists, in order of preference.
+        Path[] candidates = new Path[]{
+                workdir.resolve(baseDcpName + "_vivado_routed.dcp"),
+                workdir.resolve(baseDcpName + "_lsf_routed.dcp"),
+                workdir.resolve(baseDcpName + "_routed.dcp"),
+                workdir.resolve(baseDcpName + ".dcp"),
+        };
+        Path dcp = null;
+        for (Path c : candidates) {
+            if (java.nio.file.Files.exists(c)) {
+                dcp = c;
+                break;
+            }
+        }
+        if (dcp == null) {
+            throw new RuntimeException("No DCP found to report timing on (looked for "
+                    + java.util.Arrays.toString(candidates) + ")");
+        }
+
+        Path tclLog = workdir.resolve(baseDcpName + "_report_timing.log");
+        String tcl = "open_checkpoint {" + dcp + "}; " + reportTimingTcl();
+        System.out.println("** Running Vivado report_timing on " + dcp);
+        VivadoTools.runTcl(tclLog, tcl, true);
+        System.out.println("** Timing report log: " + tclLog);
+    }
+
+    /** Single-quote a string for safe inclusion in a `sh -c` command line. */
+    private static String shellEscape(String s) {
+        return "'" + s.replace("'", "'\\''") + "'";
+    }
+
+    /**
+     * Submits an RWRoute partial route + HoldFixer pass on the unrouted DCP via
+     * bsub and blocks (using {@code bsub -K}) until the LSF job finishes. The
+     * routed DCP lands at {@code <baseDcpName>_lsf_routed.dcp}.
+     */
+    private static void runLsfRoute(String baseDcpName, joptsimple.OptionSet options) {
+        Path workdir = Paths.get(".").toAbsolutePath().normalize();
+        Path inputDcp = workdir.resolve(baseDcpName + ".dcp");
+        Path outputDcp = workdir.resolve(baseDcpName + "_lsf_routed.dcp");
+        Path stdoutLog = workdir.resolve(baseDcpName + "_lsf_route.out");
+        Path stderrLog = workdir.resolve(baseDcpName + "_lsf_route.err");
+
+        String defaultBsubOpts = "-n 4 -R rusage[mem=64000] -W 6:00";
+        String bsubOpts = options.has("lsf-bsub-opts")
+                ? (String) options.valueOf("lsf-bsub-opts")
+                : defaultBsubOpts;
+
+        String launcher = com.xilinx.rapidwright.util.FileTools.getRapidWrightPath()
+                + java.io.File.separator + "bin" + java.io.File.separator + "rapidwright";
+        String jvmHeap = "60g";
+
+        // Write a small wrapper script next to the DCPs. We need this (rather
+        // than passing a one-liner via `sh -c`) because some LSF hosts have a
+        // broken profile-sourcing chain (e.g. Vivado settings64.sh fails when
+        // awk isn't on the default PATH), which kills the bsub shell before
+        // our launcher ever runs. The wrapper:
+        //   1. Sets PATH so basic utilities are findable BEFORE
+        //   2. Sourcing .bashrc (so Vivado/Java env vars get set up properly)
+        //   3. Sets _JAVA_OPTIONS for the heap
+        //   4. Execs the launcher
+        Path wrapperScript = workdir.resolve(baseDcpName + "_lsf_route.sh");
+        StringBuilder sb = new StringBuilder();
+        sb.append("#!/bin/bash\n");
+        sb.append("export PATH=/usr/bin:/bin:$PATH\n");
+        sb.append("[ -f \"$HOME/.bashrc\" ] && source \"$HOME/.bashrc\"\n");
+        sb.append("export _JAVA_OPTIONS=\"-Xmx").append(jvmHeap).append("\"\n");
+        sb.append("exec ").append(launcher)
+                .append(" com.xilinx.rapidwright.rapidsa.RapidSARouteJob ")
+                .append(inputDcp).append(' ')
+                .append(outputDcp).append(" clk\n");
+        try {
+            java.nio.file.Files.write(wrapperScript, sb.toString().getBytes());
+            wrapperScript.toFile().setExecutable(true);
+        } catch (java.io.IOException e) {
+            throw new RuntimeException("Failed to write LSF wrapper script " + wrapperScript, e);
+        }
+
+        // bsub -K blocks until the job exits.
+        String fullBsub = "bsub -K " + bsubOpts
+                + " -o " + stdoutLog
+                + " -e " + stderrLog
+                + " /bin/bash " + wrapperScript;
+        System.out.println("** Submitting LSF route job (blocking until complete):");
+        System.out.println("   " + fullBsub);
+
+        ProcessBuilder pb = new ProcessBuilder("sh", "-c", fullBsub);
+        pb.inheritIO();
+        try {
+            Process p = pb.start();
+            int exit = p.waitFor();
+            if (exit != 0) {
+                throw new RuntimeException("bsub exited with status " + exit
+                        + "; see " + stdoutLog + " and " + stderrLog + " for details");
+            }
+            if (!java.nio.file.Files.exists(outputDcp)) {
+                throw new RuntimeException("LSF job reported success but " + outputDcp
+                        + " was not produced; see " + stdoutLog + " and " + stderrLog);
+            }
+            System.out.println("** LSF route done: " + outputDcp);
+        } catch (java.io.IOException | InterruptedException e) {
+            throw new RuntimeException("Failed to run LSF route via bsub: " + e.getMessage(), e);
+        }
+    }
+
+    private static String[] createIndexedInstanceNames(String prefix, int count) {
+        String[] names = new String[count];
+        for (int i = 0; i < count; i++) {
+            names[i] = prefix + i;
+        }
+        return names;
+    }
+
+    /**
+     * For instances named {@code prefix0..prefix(count-1)} placed in the design,
+     * returns the name of the lowest-indexed instance that landed in each SLR.
+     * The result is sorted by EB index ascending, so {@code [0]} is the
+     * topmost EB (lowest logical index) and matches where the primary
+     * peripheral channel would be placed at the top of the array.
+     */
+    private static String[] computeFirstEbPerSLR(Design design, String prefix, int count) {
+        Map<String, ModuleInst> miByName = new HashMap<>();
+        for (ModuleInst mi : design.getModuleInsts()) {
+            miByName.put(mi.getName(), mi);
+        }
+        TreeMap<Integer, Integer> firstIndexPerSLR = new TreeMap<>();
+        for (int i = 0; i < count; i++) {
+            ModuleInst mi = miByName.get(prefix + i);
+            if (mi == null || !mi.isPlaced()) continue;
+            SLR slr = mi.getPlacement().getTile().getSLR();
+            firstIndexPerSLR.putIfAbsent(slr.getId(), i);
+        }
+        return firstIndexPerSLR.values().stream()
+                .sorted()
+                .map(i -> prefix + i)
+                .toArray(String[]::new);
+    }
+
+    private static void debugFindMultiSourceNets(Design design) {
+        EDIFNetlist nl = design.getNetlist();
+        EDIFCell topCell = nl.getTopCell();
+
+        // For each top-level net, simulate getNetAliases and catch the exception.
+        for (EDIFNet net : topCell.getNets()) {
+            com.xilinx.rapidwright.edif.EDIFHierNet hn =
+                    nl.getHierNetFromName(net.getName());
+            try {
+                nl.getNetAliases(hn);
+            } catch (RuntimeException e) {
+                System.err.println("getNetAliases FAILS for net '" + net.getName()
+                        + "': " + e.getMessage());
+                // Dump all port-insts on this exact net (top-level only)
+                for (EDIFPortInst p : net.getPortInsts()) {
+                    EDIFCellInst inst = p.getCellInst();
+                    String kind;
+                    if (inst == null) {
+                        kind = p.isInput() ? "TOP-INPUT" : (p.isOutput() ? "TOP-OUTPUT" : "TOP-INOUT");
+                    } else {
+                        boolean leaf = inst.getCellType().isLeafCellOrBlackBox();
+                        kind = (leaf ? "LEAF-" : "HIER-") + (p.isOutput() ? "OUT" : (p.isInput() ? "IN" : "INOUT"));
+                    }
+                    System.err.println("    " + kind + " " + (inst == null ? "<top>" : inst.getName())
+                            + "." + p.getName());
+                }
+            }
+        }
+    }
+
+    private static String[][] createTileInstanceNames(int nRows, int nCols) {
+        String[][] names = new String[nRows][nCols];
+        for (int row = 0; row < nRows; row++) {
+            for (int col = 0; col < nCols; col++) {
+                names[row][col] = "tile_x" + col + "y" + row;
+            }
+        }
+        return names;
     }
 
     /**
@@ -410,13 +801,20 @@ public class RapidSA {
 
         RelocatableTileRectangle moduleBoundingBox = dcuModule.getBoundingBox();
         List<RelocatableTileRectangle> placedBoundingBoxes = new ArrayList<>();
+        List<String> placedBoundingBoxNames = new ArrayList<>();
 
-        // Seed with bounding boxes from all already-placed ModuleInsts (weight EBs, etc.)
+        // Seed with the GEMM tile + SLR-crossing bboxes ArrayBuilder retained pre-flatten.
+        for (RelocatableTileRectangle bb : ab.getPlacedArrayBoundingBoxes()) {
+            placedBoundingBoxes.add(bb);
+            placedBoundingBoxNames.add("array_bbox");
+        }
+        // Then add bboxes for any post-flatten ModuleInsts (weight EBs placed earlier in this run).
         for (ModuleInst existingMi : arrayDesign.getModuleInsts()) {
             if (existingMi.isPlaced()) {
                 Module mod = existingMi.getModule();
                 placedBoundingBoxes.add(mod.getBoundingBox()
                         .getCorresponding(existingMi.getPlacement().getTile(), mod.getAnchor().getTile()));
+                placedBoundingBoxNames.add(existingMi.getName());
             }
         }
 
@@ -501,8 +899,27 @@ public class RapidSA {
                 throw new RuntimeException("Failed to place " + instName + " at " + bestAnchor);
             }
 
-            placedBoundingBoxes.add(moduleBoundingBox
-                    .getCorresponding(bestAnchor.getTile(), dcuModule.getAnchor().getTile()));
+            RelocatableTileRectangle placedBb = moduleBoundingBox
+                    .getCorresponding(bestAnchor.getTile(), dcuModule.getAnchor().getTile());
+            placedBoundingBoxes.add(placedBb);
+            placedBoundingBoxNames.add(instName);
+
+            // Diagnostic: print this EB's bbox and check for overlap against everything
+            // already in placedBoundingBoxes (excluding the one we just added).
+            System.out.println("[InputEB-PLACE] " + instName + " bbox: minCol=" + placedBb.getMinColumn()
+                    + " maxCol=" + placedBb.getMaxColumn()
+                    + " minRow=" + placedBb.getMinRow()
+                    + " maxRow=" + placedBb.getMaxRow());
+            for (int k = 0; k < placedBoundingBoxes.size() - 1; k++) {
+                RelocatableTileRectangle other = placedBoundingBoxes.get(k);
+                if (other.overlaps(placedBb)) {
+                    System.out.println("[InputEB-PLACE]   *** OVERLAP with '" + placedBoundingBoxNames.get(k)
+                            + "' bbox: minCol=" + other.getMinColumn()
+                            + " maxCol=" + other.getMaxColumn()
+                            + " minRow=" + other.getMinRow()
+                            + " maxRow=" + other.getMaxRow());
+                }
+            }
 
             // Add newly placed sites to occupied set for subsequent iterations
             for (SiteInst modSi : dcuModule.getSiteInsts()) {
@@ -593,6 +1010,84 @@ public class RapidSA {
         }
 
         System.out.println("  ** PLACED MM2S NOC: mm2s at " + bestAnchor);
+    }
+
+    /**
+     * Places an additional MM2S NOC channel instance at the top-right of a
+     * specific SLR. Uses {@link ArrayBuilder#getPlacedArrayBoundingBoxes()}
+     * to avoid the GEMM tile / SLR-crossing footprints that flattenDesign()
+     * has already removed from the queryable ModuleInst list.
+     */
+    private static void placeMM2SNOCChannelInSLR(ArrayBuilder ab, Module mm2sModule,
+                                                 String instName, SLR slrFilter) {
+        Design arrayDesign = ab.getArray();
+        RelocatableTileRectangle moduleBoundingBox = mm2sModule.getBoundingBox();
+
+        List<RelocatableTileRectangle> existingBBs = new ArrayList<>(ab.getPlacedArrayBoundingBoxes());
+        for (ModuleInst existingMi : arrayDesign.getModuleInsts()) {
+            if (existingMi.isPlaced()) {
+                Module mod = existingMi.getModule();
+                existingBBs.add(mod.getBoundingBox()
+                        .getCorresponding(existingMi.getPlacement().getTile(), mod.getAnchor().getTile()));
+            }
+        }
+
+        Set<Tile> occupiedTiles = new HashSet<>();
+        for (SiteInst si : arrayDesign.getSiteInsts()) {
+            occupiedTiles.add(si.getTile());
+        }
+
+        // Top-right corner of the array within the requested SLR
+        // Compare SLRs by id to avoid object-identity mismatches.
+        int slrFilterId = slrFilter.getId();
+        int targetRow = Integer.MAX_VALUE;
+        int targetCol = Integer.MIN_VALUE;
+        for (SiteInst si : arrayDesign.getSiteInsts()) {
+            if (si.getTile().getSLR().getId() != slrFilterId) continue;
+            targetRow = Math.min(targetRow, si.getTile().getRow());
+            targetCol = Math.max(targetCol, si.getTile().getColumn());
+        }
+
+        ModuleInst mi = arrayDesign.createModuleInst(instName, mm2sModule);
+        Site bestAnchor = null;
+        int bestDist = Integer.MAX_VALUE;
+
+        for (Site anchor : mm2sModule.getAllValidPlacements()) {
+            if (anchor.getTile().getSLR().getId() != slrFilterId) continue;
+            RelocatableTileRectangle candidateBB = moduleBoundingBox
+                    .getCorresponding(anchor.getTile(), mm2sModule.getAnchor().getTile());
+
+            boolean overlaps = false;
+            for (RelocatableTileRectangle existing : existingBBs) {
+                if (existing.overlaps(candidateBB)) { overlaps = true; break; }
+            }
+            if (overlaps) continue;
+
+            boolean siteConflict = false;
+            for (SiteInst modSi : mm2sModule.getSiteInsts()) {
+                Site newSite = mm2sModule.getCorrespondingSite(modSi, anchor);
+                if (newSite != null && occupiedTiles.contains(newSite.getTile())) {
+                    siteConflict = true; break;
+                }
+            }
+            if (siteConflict) continue;
+
+            int dist = Math.abs(anchor.getTile().getColumn() - targetCol)
+                     + Math.abs(anchor.getTile().getRow() - targetRow);
+            if (dist < bestDist) {
+                bestDist = dist;
+                bestAnchor = anchor;
+            }
+        }
+
+        if (bestAnchor == null) {
+            throw new RuntimeException("Could not find valid placement for " + instName + " in SLR " + slrFilter.getId());
+        }
+        if (!mi.place(bestAnchor, false, false)) {
+            throw new RuntimeException("Failed to place " + instName + " at " + bestAnchor);
+        }
+
+        System.out.println("  ** PLACED MM2S NOC: " + instName + " at " + bestAnchor + " (SLR " + slrFilter.getId() + ")");
     }
 
     /**

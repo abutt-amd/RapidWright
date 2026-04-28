@@ -28,14 +28,46 @@ import com.xilinx.rapidwright.design.blocks.PBlock;
 import com.xilinx.rapidwright.design.blocks.PBlockSide;
 import com.xilinx.rapidwright.edif.EDIFPort;
 
+import java.util.Collections;
 import java.util.List;
 import java.util.Map;
 
 public interface RapidComponent {
+    final class SLRCrossingConnection {
+        private final String topPortBusName;
+        private final String bottomPortBusName;
+
+        public SLRCrossingConnection(String topPortBusName, String bottomPortBusName) {
+            this.topPortBusName = topPortBusName;
+            this.bottomPortBusName = bottomPortBusName;
+        }
+
+        public String getTopPortBusName() {
+            return topPortBusName;
+        }
+
+        public String getBottomPortBusName() {
+            return bottomPortBusName;
+        }
+    }
+
     String getComponentName();
     List<String> getDesignTclLines();
     String getClkName();
     String getResetName();
     PBlock getPBlock();
+
+    default PBlock getSLRCrossingPBlock() {
+        return getPBlock();
+    }
+
     Map<EDIFPort, PBlockSide> getSideMap(Design d);
+
+    default boolean shouldCompileSLRCrossing() {
+        return false;
+    }
+
+    default List<SLRCrossingConnection> getSLRCrossingConnections(Design d) {
+        return Collections.emptyList();
+    }
 }

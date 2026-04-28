@@ -181,6 +181,9 @@ public class InlineFlopTools {
 
         for (Entry<EDIFPort, PBlockSide> entry : portSideMap.entrySet()) {
             EDIFPort port = entry.getKey();
+            if (port.getName().startsWith("[]")) {
+                System.out.println();
+            }
             PBlockSide side = entry.getValue();
             if (port.getName().equals(clkNet)) {
                 continue;
@@ -458,7 +461,13 @@ public class InlineFlopTools {
         for (EDIFCellInst inst : design.getTopEDIFCell().getCellInsts()) {
             if (inst.getName().endsWith(INLINE_SUFFIX)) {
                 Cell flop = design.getCell(inst.getName());
+                if (flop == null) {
+                    flop = design.getCell(EDIFTools.VIVADO_PRESERVE_PORT_INTERFACE + inst.getName());
+                }
                 SiteInst si = flop.getSiteInst();
+                if (si.getSiteName().contains("SLICE_X114Y552")) {
+                    System.out.println();
+                }
                 // Assume we only placed one flop per SiteInst
                 siteInstToRemove.add(si);
                 for (SitePinInst pin : si.getSitePinInsts()) {

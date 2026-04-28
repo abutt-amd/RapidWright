@@ -26,9 +26,11 @@ import com.xilinx.rapidwright.design.ConstraintGroup;
 import com.xilinx.rapidwright.design.Design;
 import com.xilinx.rapidwright.design.Module;
 import com.xilinx.rapidwright.design.ModuleInst;
+import com.xilinx.rapidwright.design.NetTools;
 import com.xilinx.rapidwright.design.blocks.PBlock;
 import com.xilinx.rapidwright.design.blocks.PBlockSide;
 import com.xilinx.rapidwright.design.tools.ArrayBuilder;
+import com.xilinx.rapidwright.design.DesignTools;
 import com.xilinx.rapidwright.design.tools.InlineFlopTools;
 import com.xilinx.rapidwright.design.xdc.ConstraintTools;
 import com.xilinx.rapidwright.device.IntentCode;
@@ -59,6 +61,7 @@ import java.util.Map;
 import java.util.Set;
 
 public class ArrayBuilderSLRCrossingCreator {
+    private static final String PE_RUN_DIR = "PerformanceExplorer";
     private static final List<String> INPUT_KERNEL_OPTS = Arrays.asList("k", "kernel");
     private static final List<String> CROSSING_DESIGN_OPTS = Arrays.asList("c", "crossing");
     private static final List<String> TOP_INST_NAME_OPTS = Arrays.asList("t", "top-inst");
@@ -67,6 +70,10 @@ public class ArrayBuilderSLRCrossingCreator {
     private static final List<String> OUTPUT_OPTS = Arrays.asList("o", "output");
     private static final List<String> OUTPUT_CROSSING_MAP_OPTS = Arrays.asList("m", "crossing-map");
     private static final List<String> HELP_OPTS = Arrays.asList("?", "h", "help");
+    private static final double DEFAULT_MIN_CLK_UNCERT = -0.100;
+    private static final double DEFAULT_MAX_CLK_UNCERT = 0.250;
+    private static final double DEFAULT_STEP_CLK_UNCERT = 0.025;
+    private static final double DEFAULT_BASE_CLK_UNCERT = 0.300;
 
     private static OptionParser createOptionParser() {
         return new OptionParser() {
@@ -188,13 +195,192 @@ public class ArrayBuilderSLRCrossingCreator {
         return bestCandidate;
     }
 
-    private static void explorePerformance(Design design, boolean reuse) {
-        PerformanceExplorer pe = new PerformanceExplorer(design, "SLRCrossingCreator", "clk", 1.6);
+    private static void explorePerformance(Design design, String runDirectory, boolean reuse, double clkPeriod) {
+        PerformanceExplorer pe = new PerformanceExplorer(design, runDirectory, "clk", clkPeriod);
+        pe.setMinClockUncertainty(DEFAULT_MIN_CLK_UNCERT);
+        pe.setMaxClockUncertainty(DEFAULT_MAX_CLK_UNCERT);
+        pe.setClockUncertaintyStep(DEFAULT_STEP_CLK_UNCERT);
+        pe.updateClockUncertaintyValues();
+        pe.setBaseClockUncertainty(DEFAULT_BASE_CLK_UNCERT);
         pe.setGetBestPerPBlock(true);
         pe.setReusePreviousResults(reuse);
         pe.setLockPlacement(true);
         pe.explorePerformance();
         pe.getBestDesignPerPBlock();
+    }
+
+    public static void createSLRCrossing(Design kernelDesign, Design topDesign,
+                                         Map<EDIFPort, PBlockSide> sideMap,
+                                         String topInstName, String bottomInstName,
+                                         String outputPath) {
+        createSLRCrossing(kernelDesign, topDesign, sideMap, topInstName, bottomInstName, outputPath, null, 1.6);
+    }
+
+    public static void createSLRCrossing(Design kernelDesign, Design topDesign,
+                                         Map<EDIFPort, PBlockSide> sideMap,
+                                         String topInstName, String bottomInstName,
+                                         String outputPath, PBlock pblockOverride) {
+        createSLRCrossing(kernelDesign, topDesign, sideMap, topInstName, bottomInstName, outputPath, pblockOverride, 1.6);
+    }
+
+    public static void createSLRCrossing(Design kernelDesign, Design topDesign,
+                                         Map<EDIFPort, PBlockSide> sideMap,
+                                         String topInstName, String bottomInstName,
+                                         String outputPath, PBlock pblockOverride,
+                                         double clkPeriod) {
+        if (!kernelDesign.getDevice().getName().equals("xcv80")) {
+            System.out.println("SLRCrossing creator currently only tested for xcv80");
+        }
+
+        PBlock pblock = pblockOverride;
+        if (pblock == null) {
+            Map<String, PBlock> pblocks = ConstraintTools.getPBlocksFromXDC(kernelDesign);
+            if (pblocks.isEmpty()) {
+                throw new RuntimeException("Provided kernel design does not contain a PBlock");
+            }
+
+            if (pblocks.size() > 1) {
+                throw new RuntimeException("Kernel design should only contain 1 PBlock but currently contains "
+                        + pblocks.size());
+            }
+
+            pblock = pblocks.values().iterator().next();
+        }
+
+        List<String> clockNets = ConstraintTools.getClockNetsFromXDC(kernelDesign);
+
+        assert(clockNets.size() == 1);
+
+        ArrayBuilder.removeBUFGs(kernelDesign);
+
+        Module module = new Module(kernelDesign, false);
+
+        module.getNet(clockNets.get(0)).unroute();
+        module.setPBlock(pblock.toString());
+        module.calculateAllValidPlacements(kernelDesign.getDevice());
+        List<List<Site>> validPlacementGrid = ArrayBuilder.getValidPlacementGrid(module);
+
+        int lastAnchorInSLRIndex = -1;
+
+        int xCoordinate = 0;
+        int x = 0;
+        for (Site site : validPlacementGrid.get(0)) {
+            if (site.getInstanceX() == module.getAnchor().getInstanceX()) {
+                xCoordinate = x;
+                break;
+            }
+            x++;
+        }
+
+        SLR firstSLR = validPlacementGrid.get(0).get(0).getTile().getSLR();
+
+        int i = 0;
+        for (List<Site> sites : validPlacementGrid) {
+            Site anchor = sites.get(xCoordinate);
+            if (anchor.getTile().getSLR() != firstSLR) {
+                break;
+            }
+            lastAnchorInSLRIndex = i;
+            i++;
+        }
+
+        // Merge encrypted cells
+        List<String> encryptedCells = module.getNetlist().getEncryptedCells();
+        if (!encryptedCells.isEmpty()) {
+            System.out.println("Encrypted cells merged");
+            topDesign.getNetlist().addEncryptedCells(encryptedCells);
+        }
+
+        EDIFHierCellInst topHierInst = topDesign.getNetlist().getHierCellInstFromName(topInstName);
+        if (topHierInst == null) {
+            throw new RuntimeException("Instance name " + topInstName + " is invalid");
+        }
+        EDIFTools.removeVivadoBusPreventionAnnotations(kernelDesign.getNetlist());
+
+        EDIFHierCellInst bottomHierInst = topDesign.getNetlist().getHierCellInstFromName(bottomInstName);
+        if (bottomHierInst == null) {
+            throw new RuntimeException("Instance name " + bottomInstName + " is invalid");
+        }
+
+        Site lastAnchorInSLR = validPlacementGrid.get(lastAnchorInSLRIndex).get(xCoordinate);
+        assert lastAnchorInSLR != null;
+        int topOffsetY = lastAnchorInSLR.getTile().getRow() - module.getAnchor().getTile().getRow();
+
+        PBlock topPBlock = new PBlock(kernelDesign.getDevice(), pblock.getAllSites(null));
+        topPBlock.setName("pblock_0");
+        boolean wasMoved = topPBlock.movePBlock(0, topOffsetY);
+        if (!wasMoved) {
+            throw new RuntimeException("Failed to move top pblock to bottom of SLR");
+        }
+
+        List<PBlock> candidates = getCandidateBottomPBlocks(module, topPBlock, lastAnchorInSLRIndex);
+        PBlock bottomPBlock = chooseBestCandidate(topPBlock, candidates);
+        bottomPBlock.setName("pblock_1");
+
+        PBlock overallPBlock = new PBlock(kernelDesign.getDevice(), topPBlock + " " + bottomPBlock);
+        overallPBlock.setName("pblock_2");
+
+        addPBlockToDesign(topDesign, overallPBlock);
+        addPBlockToDesign(topDesign, topPBlock);
+        addPBlockToDesign(topDesign, bottomPBlock);
+
+        topDesign.addXDCConstraint(ConstraintGroup.LATE, "add_cells_to_pblock pblock_2 -top");
+        topDesign.addXDCConstraint(ConstraintGroup.LATE, "add_cells_to_pblock pblock_0 [get_cells " + topInstName + "]");
+        topDesign.addXDCConstraint(ConstraintGroup.LATE, "add_cells_to_pblock pblock_1 [get_cells " + bottomInstName + "]");
+
+        topDesign.getNetlist().consolidateAllToWorkLibrary();
+        topDesign.flattenDesign();
+        topDesign.setDesignOutOfContext(true);
+        topDesign.setAutoIOBuffers(false);
+
+        // Get black-box port maps
+        EDIFNetlist netlist = topDesign.getNetlist();
+        Map<String, String> topBBPortMap = getBlackBoxToTopLevelMap(netlist, topInstName);
+        Map<String, String> bottomBBPortMap = getBlackBoxToTopLevelMap(netlist, bottomInstName);
+
+        EDIFCell topCell = netlist.getTopCell();
+        EDIFCellInst topBBInst = netlist.getCellInstFromHierName(topInstName);
+        Map<EDIFPort, PBlockSide> topSideMap = new HashMap<>();
+        for (Map.Entry<String, String> portPair : topBBPortMap.entrySet()) {
+            PBlockSide originalSide = sideMap.get(topBBInst.getPort(portPair.getKey()));
+            if (originalSide == null || originalSide == PBlockSide.BOTTOM) {
+                continue;
+            }
+            topSideMap.put(topCell.getPort(portPair.getValue()), originalSide);
+        }
+
+        InlineFlopTools.createAndPlacePortFlopsOnSide(topDesign, "clk", topPBlock, topSideMap);
+        topDesign.getNetlist().resetParentNetMap();
+
+        Map<EDIFPort, PBlockSide> bottomSideMap = new HashMap<>();
+        EDIFCellInst bottomBBInst = netlist.getCellInstFromHierName(bottomInstName);
+        for (Map.Entry<String, String> portPair : bottomBBPortMap.entrySet()) {
+            EDIFPort bbPort = bottomBBInst.getPort(portPair.getKey());
+            PBlockSide originalSide = sideMap.get(bbPort);
+            if (originalSide == null || originalSide == PBlockSide.TOP) {
+                continue;
+            }
+            EDIFPort topCellPort = topCell.getPort(portPair.getValue());
+            bottomSideMap.put(topCellPort, originalSide);
+        }
+        bottomSideMap.keySet().removeAll(topSideMap.keySet());
+
+        InlineFlopTools.createAndPlacePortFlopsOnSide(topDesign, "clk", bottomPBlock, bottomSideMap);
+        netlist.resetParentNetMap();
+
+        EDIFTools.ensurePreservedInterfaceVivado(topDesign.getNetlist());
+
+        String runDirectory = Paths.get(outputPath).getParent().resolve(PE_RUN_DIR).toString();
+        explorePerformance(topDesign, runDirectory, false, clkPeriod);
+        Design bestDesign = Design.readCheckpoint(Paths.get(runDirectory, "pblock0_best.dcp").toString());
+        EDIFTools.removeVivadoBusPreventionAnnotations(bestDesign.getNetlist());
+        InlineFlopTools.removeInlineFlops(bestDesign);
+        NetTools.unrouteTopLevelNetsThatLeavePBlock(bestDesign, topPBlock);
+        NetTools.unrouteTopLevelNetsThatLeavePBlock(bestDesign, bottomPBlock);
+        DesignTools.createPossiblePinsToStaticNets(bestDesign);
+        DesignTools.createMissingSitePinInsts(bestDesign);
+
+        bestDesign.writeCheckpoint(outputPath);
     }
 
     public static Map<String, String> getBlackBoxToTopLevelMap(EDIFNetlist netlist, String blackBoxName) {
@@ -296,158 +482,7 @@ public class ArrayBuilderSLRCrossingCreator {
 
         Path topFile = Paths.get(topDesignPath);
         Design topDesign = Design.readCheckpoint(topFile);
-
-        if (!kernelDesign.getDevice().getName().equals("xcv80")) {
-            System.out.println("SLRCrossing creator currently only tested for xcv80");
-        }
-
-        Map<String, PBlock> pblocks = ConstraintTools.getPBlocksFromXDC(kernelDesign);
-        if (pblocks.isEmpty()) {
-            throw new RuntimeException("Provided kernel design does not contain a PBlock");
-        }
-
-        if (pblocks.size() > 1) {
-            throw new RuntimeException("Kernel design should only contain 1 PBlock but currently contains "
-                    + pblocks.size());
-        }
-
-        PBlock pblock = pblocks.values().iterator().next();
-
-
-
-        List<String> clockNets = ConstraintTools.getClockNetsFromXDC(kernelDesign);
-
-        assert(clockNets.size() == 1);
-
-        ArrayBuilder.removeBUFGs(kernelDesign);
-
-        Module module = new Module(kernelDesign, false);
-
-        module.getNet(clockNets.get(0)).unroute();
-        module.setPBlock(pblock.toString());
-        module.calculateAllValidPlacements(kernelDesign.getDevice());
-        List<List<Site>> validPlacementGrid = ArrayBuilder.getValidPlacementGrid(module);
-
-        int lastAnchorInSLRIndex = -1;
-        int firstAnchorInOtherSLRIndex = -1;
-
-        int xCoordinate = 0;
-        int x = 0;
-        for (Site site : validPlacementGrid.get(0)) {
-            if (site.getInstanceX() == module.getAnchor().getInstanceX()) {
-                xCoordinate = x;
-                break;
-            }
-            x++;
-        }
-
-        SLR firstSLR = validPlacementGrid.get(0).get(0).getTile().getSLR();
-
-        int i = 0;
-        for (List<Site> sites : validPlacementGrid) {
-            Site anchor = sites.get(xCoordinate);
-            if (anchor.getTile().getSLR() != firstSLR) {
-                firstAnchorInOtherSLRIndex = i;
-                break;
-            }
-            lastAnchorInSLRIndex = i;
-            i++;
-        }
-
-        // Merge encrypted cells
-        List<String> encryptedCells = module.getNetlist().getEncryptedCells();
-        if (!encryptedCells.isEmpty()) {
-            System.out.println("Encrypted cells merged");
-            topDesign.getNetlist().addEncryptedCells(encryptedCells);
-        }
-
-        EDIFHierCellInst topHierInst = topDesign.getNetlist().getHierCellInstFromName(topInstName);
-        if (topHierInst == null) {
-            throw new RuntimeException("Instance name " + topInstName + " is invalid");
-        }
-        EDIFTools.removeVivadoBusPreventionAnnotations(kernelDesign.getNetlist());
-
-        EDIFHierCellInst bottomHierInst = topDesign.getNetlist().getHierCellInstFromName(bottomInstName);
-        if (bottomHierInst == null) {
-            throw new RuntimeException("Instance name " + bottomInstName + " is invalid");
-        }
-
-        Site lastAnchorInSLR = validPlacementGrid.get(lastAnchorInSLRIndex).get(xCoordinate);
-        assert lastAnchorInSLR != null;
-        int topOffsetY = lastAnchorInSLR.getTile().getRow() - module.getAnchor().getTile().getRow();
-
-        PBlock topPBlock = new PBlock(kernelDesign.getDevice(), pblock.getAllSites(null));
-        topPBlock.setName("pblock_0");
-        boolean wasMoved = topPBlock.movePBlock(0, topOffsetY);
-        if (!wasMoved) {
-            throw new RuntimeException("Failed to move top pblock to bottom of SLR");
-        }
-
-        List<PBlock> candidates = getCandidateBottomPBlocks(module, topPBlock, lastAnchorInSLRIndex);
-        PBlock bottomPBlock = chooseBestCandidate(topPBlock, candidates);
-        bottomPBlock.setName("pblock_1");
-
-        Set<Site> allSites = new HashSet<>(topPBlock.getAllSites(null));
-        allSites.addAll(bottomPBlock.getAllSites(null));
-        PBlock overallPBlock = new PBlock(kernelDesign.getDevice(), topPBlock + " " + bottomPBlock);
-        overallPBlock.setName("pblock_2");
-
-        addPBlockToDesign(topDesign, overallPBlock);
-        addPBlockToDesign(topDesign, topPBlock);
-        addPBlockToDesign(topDesign, bottomPBlock);
-
-        topDesign.addXDCConstraint(ConstraintGroup.LATE, "add_cells_to_pblock pblock_2 -top");
-        topDesign.addXDCConstraint(ConstraintGroup.LATE, "add_cells_to_pblock pblock_0 [get_cells " + topInstName + "]");
-        topDesign.addXDCConstraint(ConstraintGroup.LATE, "add_cells_to_pblock pblock_1 [get_cells " + bottomInstName + "]");
-
-        topDesign.getNetlist().consolidateAllToWorkLibrary();
-        topDesign.flattenDesign();
-        topDesign.setDesignOutOfContext(true);
-        topDesign.setAutoIOBuffers(false);
-
-        // Get black-box port maps
-        EDIFNetlist netlist = topDesign.getNetlist();
-        Map<String, String> topBBPortMap = getBlackBoxToTopLevelMap(netlist, topInstName);
-        Map<String, String> bottomBBPortMap = getBlackBoxToTopLevelMap(netlist, bottomInstName);
-
         Map<EDIFPort, PBlockSide> sideMap = InlineFlopTools.parseSideMap(kernelDesign.getNetlist(), sideMapPath);
-        EDIFCell topCell = netlist.getTopCell();
-        EDIFCellInst topBBInst = netlist.getCellInstFromHierName(topInstName);
-        Map<EDIFPort, PBlockSide> topSideMap = new HashMap<>();
-        for (Map.Entry<String, String> portPair : topBBPortMap.entrySet()) {
-            PBlockSide originalSide = sideMap.get(topBBInst.getPort(portPair.getKey()));
-            if (originalSide == null || originalSide == PBlockSide.BOTTOM) {
-                continue;
-            }
-            topSideMap.put(topCell.getPort(portPair.getValue()), originalSide);
-        }
-
-        InlineFlopTools.createAndPlacePortFlopsOnSide(topDesign, "clk", topPBlock, topSideMap);
-        topDesign.getNetlist().resetParentNetMap();
-
-        Map<EDIFPort, PBlockSide> bottomSideMap = new HashMap<>();
-        EDIFCellInst bottomBBInst = netlist.getCellInstFromHierName(bottomInstName);
-        for (Map.Entry<String, String> portPair : bottomBBPortMap.entrySet()) {
-            EDIFPort bbPort = bottomBBInst.getPort(portPair.getKey());
-            PBlockSide originalSide = sideMap.get(bbPort);
-            if (originalSide == null || originalSide == PBlockSide.TOP) {
-                continue;
-            }
-            EDIFPort topCellPort = topCell.getPort(portPair.getValue());
-            bottomSideMap.put(topCellPort, originalSide);
-        }
-        bottomSideMap.keySet().removeAll(topSideMap.keySet());
-
-        InlineFlopTools.createAndPlacePortFlopsOnSide(topDesign, "clk", bottomPBlock, bottomSideMap);
-        netlist.resetParentNetMap();
-
-        EDIFTools.ensurePreservedInterfaceVivado(topDesign.getNetlist());
-
-        explorePerformance(topDesign, false);
-        Design bestDesign = Design.readCheckpoint("SLRCrossingCreator/pblock0_best.dcp");
-        EDIFTools.removeVivadoBusPreventionAnnotations(bestDesign.getNetlist());
-        InlineFlopTools.removeInlineFlops(bestDesign);
-
-        bestDesign.writeCheckpoint(outputPath);
+        createSLRCrossing(kernelDesign, topDesign, sideMap, topInstName, bottomInstName, outputPath);
     }
 }

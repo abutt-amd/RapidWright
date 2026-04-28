@@ -31,6 +31,7 @@ import com.xilinx.rapidwright.edif.EDIFDirection;
 import com.xilinx.rapidwright.edif.EDIFNet;
 import com.xilinx.rapidwright.edif.EDIFNetlist;
 import com.xilinx.rapidwright.edif.EDIFPort;
+import com.xilinx.rapidwright.edif.EDIFPortInst;
 import com.xilinx.rapidwright.edif.EDIFTools;
 import com.xilinx.rapidwright.rapidsa.components.DrainTile;
 import com.xilinx.rapidwright.rapidsa.components.GEMMTile;
@@ -38,8 +39,10 @@ import com.xilinx.rapidwright.rapidsa.components.MM2SNOCChannel;
 import com.xilinx.rapidwright.rapidsa.components.EdgeBufferTile;
 import com.xilinx.rapidwright.rapidsa.components.RapidComponent;
 import com.xilinx.rapidwright.rapidsa.components.S2MMNOCChannel;
+import com.xilinx.rapidwright.util.Pair;
 
 import java.io.File;
+import java.util.Collections;
 import java.util.Map;
 import java.util.TreeMap;
 
@@ -55,7 +58,9 @@ import java.util.TreeMap;
  *     ...             ...          ...               ...
  *   InputEB_y{nR-1} tile_x0y{N}  tile_x1y{N}  ...  tile_x{nCols-1}y{nRows-1}
  *
- *                                MM2S / SA FSM
+ *
+ * Ingress and egress channel black boxes are attached after the base array
+ * has been built and passed through ArrayBuilder.
  */
 public class RapidSANetlistBuilder {
 
@@ -121,7 +126,6 @@ public class RapidSANetlistBuilder {
         RapidComponent gemmComponent = new GEMMTile(nCols, nRows);
         RapidComponent weightEbComponent = new EdgeBufferTile(nCols, EdgeBufferTile.Type.WEIGHT);
         RapidComponent inputEbComponent = new EdgeBufferTile(nRows, EdgeBufferTile.Type.INPUT);
-        RapidComponent mm2sComponent = new MM2SNOCChannel();
         if (nRows <= 0 || nCols <= 0) {
             throw new IllegalArgumentException(
                     "Array dimensions must be positive: nRows=" + nRows + ", nCols=" + nCols);
@@ -131,7 +135,6 @@ public class RapidSANetlistBuilder {
         EDIFCell gemmCell = loadComponentCell(precompileDir, gemmComponent);
         EDIFCell weightEbCell = loadComponentCell(precompileDir, weightEbComponent);
         EDIFCell inputEbCell = loadComponentCell(precompileDir, inputEbComponent);
-        EDIFCell mm2sCell = loadComponentCell(precompileDir, mm2sComponent);
 
         // Get clock and reset port names from component definitions
         String gemmClk = gemmComponent.getClkName();
@@ -139,8 +142,6 @@ public class RapidSANetlistBuilder {
         String weightEbRst = weightEbComponent.getResetName();
         String inputEbClk = inputEbComponent.getClkName();
         String inputEbRst = inputEbComponent.getResetName();
-        String mm2sClk = mm2sComponent.getClkName();
-        String mm2sRst = mm2sComponent.getResetName();
 
         // Create top-level design and migrate component cells
         Design design = new Design("systolic_array", partName);
@@ -150,12 +151,10 @@ public class RapidSANetlistBuilder {
         netlist.migrateCellAndSubCells(gemmCell, true);
         netlist.migrateCellAndSubCells(weightEbCell, true);
         netlist.migrateCellAndSubCells(inputEbCell, true);
-        netlist.migrateCellAndSubCells(mm2sCell, true);
 
         gemmCell.makePrimitive();
         weightEbCell.makePrimitive();
         inputEbCell.makePrimitive();
-        mm2sCell.makePrimitive();
 
         EDIFCell topCell = netlist.getTopCell();
 
@@ -177,14 +176,6 @@ public class RapidSANetlistBuilder {
         netlist.migrateCellAndSubCells(drainCell, true);
         drainCell.makePrimitive();
 
-        // Create S2MM NOC channel component
-        RapidComponent s2mmComponent = new S2MMNOCChannel();
-        EDIFCell s2mmCell = loadComponentCell(precompileDir, s2mmComponent);
-        String s2mmClk = s2mmComponent.getClkName();
-        String s2mmRst = s2mmComponent.getResetName();
-        netlist.migrateCellAndSubCells(s2mmCell, true);
-        s2mmCell.makePrimitive();
-
         // Create black box instances
         EDIFCellInst[][] gemmInsts = new EDIFCellInst[nRows][nCols];
         for (int r = 0; r < nRows; r++)
@@ -199,18 +190,14 @@ public class RapidSANetlistBuilder {
         for (int i = 0; i < nRows; i++)
             inputEbInsts[i] = createBlackBox(topCell, "input_eb_y" + i, inputEbCell);
 
-        EDIFCellInst mm2sInst = createBlackBox(topCell, "mm2s", mm2sCell);
-
         EDIFCellInst[] drainInsts = new EDIFCellInst[nCols];
         for (int i = 0; i < nCols; i++)
             drainInsts[i] = createBlackBox(topCell, "drain_x" + i, drainCell);
 
-        EDIFCellInst s2mmInst = createBlackBox(topCell, "s2mm", s2mmCell);
-
         // Top-level ports
         EDIFPort topClk = topCell.createPort("clk", EDIFDirection.INPUT, 1);
         EDIFPort topRstN = topCell.createPort("rst_n", EDIFDirection.INPUT, 1);
-        EDIFPort topDone = topCell.createPort("done", EDIFDirection.OUTPUT, 1);
+        topCell.createPort("done", EDIFDirection.OUTPUT, 1);
 
         // Clock: fans out to all instances
         EDIFNet clkNet = topCell.createNet("clk");
@@ -224,8 +211,6 @@ public class RapidSANetlistBuilder {
             clkNet.createPortInst(inputEbClk, inputEbInsts[i]);
         for (int i = 0; i < nCols; i++)
             clkNet.createPortInst(drainClk, drainInsts[i]);
-        clkNet.createPortInst(mm2sClk, mm2sInst);
-        clkNet.createPortInst(s2mmClk, s2mmInst);
 
         // rst_n: fans out to all instances with reset
         EDIFNet rstNNet = topCell.createNet("rst_n");
@@ -242,73 +227,23 @@ public class RapidSANetlistBuilder {
             for (int i = 0; i < nCols; i++)
                 rstNNet.createPortInst(drainRst, drainInsts[i]);
         }
-        if (mm2sRst != null) {
-            rstNNet.createPortInst(mm2sRst, mm2sInst);
-        }
-        if (s2mmRst != null) {
-            rstNNet.createPortInst(s2mmRst, s2mmInst);
-        }
 
-        // FSM done → top-level
-        connectSingleBit(topCell, "done", topDone, mm2sInst, MM2S_DONE);
-
-        // FSM output_wr_en → all drain tiles' fifo_wr_en (all bits)
-        EDIFNet outputWrEnNet = topCell.createNet("output_wr_en");
-        outputWrEnNet.createPortInst(MM2S_OUTPUT_WR_EN, mm2sInst);
-        for (int col = 0; col < nCols; col++) {
-            for (int k = 0; k < accumCount; k++) {
-                outputWrEnNet.createPortInst(DRAIN_FIFO_WR_EN + "[" + k + "]", drainInsts[col]);
-            }
-        }
-
-        // FSM sa_accum_shift → all GEMM tiles
-        EDIFNet accumShiftNet = topCell.createNet("sa_accum_shift");
-        accumShiftNet.createPortInst(MM2S_SA_ACCUM_SHIFT, mm2sInst);
-        for (int r = 0; r < nRows; r++)
-            for (int c = 0; c < nCols; c++)
-                accumShiftNet.createPortInst(GEMM_ACCUM_SHIFT, gemmInsts[r][c]);
-
-        // FSM b_rd_en → Weight Edge Buffer rd_en forwarding chain
-        EDIFNet bRdEnNet = topCell.createNet("b_rd_en");
-        bRdEnNet.createPortInst(MM2S_B_RD_EN, mm2sInst);
-        bRdEnNet.createPortInst(EB_RD_EN, weightEbInsts[0]);
+        // Internal rd_en forwarding chains stay with the base array.
         for (int i = 0; i < nCols - 1; i++) {
             EDIFNet rdEnChain = topCell.createNet("b_rd_en_chain_" + i + "_to_" + (i + 1));
             rdEnChain.createPortInst(EB_RD_EN_OUT, weightEbInsts[i]);
             rdEnChain.createPortInst(EB_RD_EN, weightEbInsts[i + 1]);
         }
-
-        // FSM a_rd_en → Input Edge Buffer rd_en forwarding chain
-        EDIFNet aRdEnNet = topCell.createNet("a_rd_en");
-        aRdEnNet.createPortInst(MM2S_A_RD_EN, mm2sInst);
-        aRdEnNet.createPortInst(EB_RD_EN, inputEbInsts[0]);
         for (int i = 0; i < nRows - 1; i++) {
             EDIFNet rdEnChain = topCell.createNet("a_rd_en_chain_" + i + "_to_" + (i + 1));
             rdEnChain.createPortInst(EB_RD_EN_OUT, inputEbInsts[i]);
             rdEnChain.createPortInst(EB_RD_EN, inputEbInsts[i + 1]);
         }
 
-        // S2MM start/done wiring
-        connectSingleBit(topCell, "s2mm_start",
-                mm2sInst, MM2S_S2MM_START, s2mmInst, S2MM_START);
-        connectSingleBit(topCell, "s2mm_done",
-                s2mmInst, S2MM_DONE, mm2sInst, MM2S_S2MM_DONE);
-
         // =====================================================================
         // Weight Edge Buffer forwarding chain (B matrix)
-        // MM2S m_data_b → EB[0].s_data → EB[0].m_data → EB[1].s_data → ...
         // =====================================================================
         EDIFNet gndNet = EDIFTools.getStaticNet(NetType.GND, topCell, netlist);
-
-        // MM2S → first weight EB
-        connectBusPorts(topCell, "b_eb_mm2s_to_eb0_data",
-                mm2sInst, MM2S_M_DATA_B, weightEbInsts[0], EB_S_DATA, ebDataWidth);
-        connectSingleBit(topCell, "b_eb_mm2s_to_eb0_valid",
-                mm2sInst, MM2S_M_VALID_B, weightEbInsts[0], EB_S_VALID);
-        // Tie word_index to 0 for N <= 16
-        for (int b = 0; b < 4; b++) {
-            gndNet.createPortInst(EB_S_WORD_INDEX + "[" + b + "]", weightEbInsts[0]);
-        }
 
         // Inter-EB forwarding chain
         for (int i = 0; i < nCols - 1; i++) {
@@ -326,14 +261,6 @@ public class RapidSANetlistBuilder {
         // =====================================================================
         // Input Edge Buffer forwarding chain (A matrix)
         // =====================================================================
-        connectBusPorts(topCell, "a_eb_mm2s_to_eb0_data",
-                mm2sInst, MM2S_M_DATA_A, inputEbInsts[0], EB_S_DATA, ebDataWidth);
-        connectSingleBit(topCell, "a_eb_mm2s_to_eb0_valid",
-                mm2sInst, MM2S_M_VALID_A, inputEbInsts[0], EB_S_VALID);
-        for (int b = 0; b < 4; b++) {
-            gndNet.createPortInst(EB_S_WORD_INDEX + "[" + b + "]", inputEbInsts[0]);
-        }
-
         for (int i = 0; i < nRows - 1; i++) {
             connectBusPorts(topCell, "a_eb_chain_data_" + i + "_to_" + (i + 1),
                     inputEbInsts[i], EB_M_DATA, inputEbInsts[i + 1], EB_S_DATA, ebDataWidth);
@@ -454,14 +381,6 @@ public class RapidSANetlistBuilder {
                     drainInsts[i], DRAIN_S_TREADY, drainInsts[i + 1], DRAIN_M_TREADY);
         }
 
-        // Drain output → S2MM channel input
-        connectBusPorts(topCell, "drain_to_s2mm_data",
-                drainInsts[0], DRAIN_M_TDATA, s2mmInst, S2MM_S_DATA, accumBits);
-        connectSingleBit(topCell, "drain_to_s2mm_valid",
-                drainInsts[0], DRAIN_M_TVALID, s2mmInst, S2MM_S_VALID);
-        connectSingleBit(topCell, "drain_to_s2mm_ready",
-                s2mmInst, S2MM_S_READY, drainInsts[0], DRAIN_M_TREADY);
-
         // Tie rightmost drain tile's upstream inputs to GND
         for (int i = 0; i < accumBits; i++) {
             gndNet.createPortInst(DRAIN_S_TDATA + "[" + i + "]", drainInsts[nCols - 1]);
@@ -507,16 +426,292 @@ public class RapidSANetlistBuilder {
         return design;
     }
 
+    public static EDIFCellInst attachMM2SNOCChannel(Design design, String precompileDir, String instanceName,
+                                                    String[][] gemmInstanceNames,
+                                                    String[] weightEbRootInstanceNames,
+                                                    String[] inputEbRootInstanceNames,
+                                                    String[] drainInstanceNames,
+                                                    String topDonePortName) {
+        return attachMM2SNOCChannel(design, precompileDir, instanceName, gemmInstanceNames,
+                weightEbRootInstanceNames, inputEbRootInstanceNames, drainInstanceNames, topDonePortName,
+                Collections.emptyMap());
+    }
+
+    /**
+     * Variant that takes a map of original GEMM tile instance names that were
+     * merged into SLR-crossing modules (typically from {@code ArrayBuilder.getMergedTileMap()}).
+     * For each merged tile, the per-tile fan-out is wired to the merged cell instance
+     * with the corresponding port-name prefix instead of a direct lookup of the
+     * (no-longer-existing) original instance.
+     */
+    public static EDIFCellInst attachMM2SNOCChannel(Design design, String precompileDir, String instanceName,
+                                                    String[][] gemmInstanceNames,
+                                                    String[] weightEbRootInstanceNames,
+                                                    String[] inputEbRootInstanceNames,
+                                                    String[] drainInstanceNames,
+                                                    String topDonePortName,
+                                                    Map<String, Pair<EDIFCellInst, String>> mergedTileMap) {
+        if (gemmInstanceNames.length == 0 || gemmInstanceNames[0].length == 0) {
+            throw new IllegalArgumentException("At least one GEMM instance is required to attach MM2S");
+        }
+        if (weightEbRootInstanceNames.length == 0) {
+            throw new IllegalArgumentException("At least one weight edge buffer root is required to attach MM2S");
+        }
+        if (inputEbRootInstanceNames.length == 0) {
+            throw new IllegalArgumentException("At least one input edge buffer root is required to attach MM2S");
+        }
+        if (drainInstanceNames.length == 0) {
+            throw new IllegalArgumentException("At least one drain instance is required to attach MM2S");
+        }
+
+        EDIFCellInst mm2sInst = attachChannelBlackBox(design, precompileDir, new MM2SNOCChannel(), instanceName);
+        EDIFCell topCell = design.getNetlist().getTopCell();
+
+        if (topDonePortName != null) {
+            connectSingleBit(topCell, "done", requirePort(topCell, topDonePortName), mm2sInst, MM2S_DONE);
+        }
+
+        EDIFCellInst firstDrainInst = requireCellInst(topCell, drainInstanceNames[0]);
+        int accumCount = getPortWidth(firstDrainInst.getCellType(), DRAIN_FIFO_WR_EN);
+        EDIFNet outputWrEnNet = topCell.createNet("output_wr_en");
+        outputWrEnNet.createPortInst(MM2S_OUTPUT_WR_EN, mm2sInst);
+        for (String drainInstanceName : drainInstanceNames) {
+            EDIFCellInst drainInst = requireCellInst(topCell, drainInstanceName);
+            for (int k = 0; k < accumCount; k++) {
+                outputWrEnNet.createPortInst(DRAIN_FIFO_WR_EN + "[" + k + "]", drainInst);
+            }
+        }
+
+        EDIFNet accumShiftNet = topCell.createNet("sa_accum_shift");
+        accumShiftNet.createPortInst(MM2S_SA_ACCUM_SHIFT, mm2sInst);
+        for (String[] rowInstanceNames : gemmInstanceNames) {
+            for (String gemmInstanceName : rowInstanceNames) {
+                Pair<EDIFCellInst, String> merged = mergedTileMap.get(gemmInstanceName);
+                if (merged != null) {
+                    accumShiftNet.createPortInst(merged.getSecond() + GEMM_ACCUM_SHIFT, merged.getFirst());
+                } else {
+                    accumShiftNet.createPortInst(GEMM_ACCUM_SHIFT, requireCellInst(topCell, gemmInstanceName));
+                }
+            }
+        }
+
+        // Per-SLR roots may already be wired into the inter-EB chain by createSystolicArrayNetlist;
+        // claimPortInst detaches them from the chain net before reattaching to the MM2S-driven net.
+        EDIFNet bRdEnNet = topCell.createNet("b_rd_en");
+        bRdEnNet.createPortInst(MM2S_B_RD_EN, mm2sInst);
+        for (String weightEbRootInstanceName : weightEbRootInstanceNames) {
+            claimPortInst(bRdEnNet, EB_RD_EN, requireCellInst(topCell, weightEbRootInstanceName));
+        }
+
+        EDIFNet aRdEnNet = topCell.createNet("a_rd_en");
+        aRdEnNet.createPortInst(MM2S_A_RD_EN, mm2sInst);
+        for (String inputEbRootInstanceName : inputEbRootInstanceNames) {
+            claimPortInst(aRdEnNet, EB_RD_EN, requireCellInst(topCell, inputEbRootInstanceName));
+        }
+
+        EDIFNet gndNet = EDIFTools.getStaticNet(NetType.GND, topCell, design.getNetlist());
+        EDIFCellInst firstWeightEbInst = requireCellInst(topCell, weightEbRootInstanceNames[0]);
+        int weightEbDataWidth = getPortWidth(firstWeightEbInst.getCellType(), EB_S_DATA);
+        // One data net per bit, one valid net: MM2S source fans out to every weight EB root.
+        EDIFNet[] bDataNets = new EDIFNet[weightEbDataWidth];
+        for (int i = 0; i < weightEbDataWidth; i++) {
+            bDataNets[i] = topCell.createNet("b_eb_" + instanceName + "_data_" + i);
+            bDataNets[i].createPortInst(MM2S_M_DATA_B + "[" + i + "]", mm2sInst);
+        }
+        EDIFNet bValidNet = topCell.createNet("b_eb_" + instanceName + "_valid");
+        bValidNet.createPortInst(MM2S_M_VALID_B, mm2sInst);
+        for (String weightEbRootInstanceName : weightEbRootInstanceNames) {
+            EDIFCellInst weightEbInst = requireCellInst(topCell, weightEbRootInstanceName);
+            for (int i = 0; i < weightEbDataWidth; i++) {
+                claimPortInst(bDataNets[i], EB_S_DATA + "[" + i + "]", weightEbInst);
+            }
+            claimPortInst(bValidNet, EB_S_VALID, weightEbInst);
+            for (int b = 0; b < 4; b++) {
+                claimPortInst(gndNet, EB_S_WORD_INDEX + "[" + b + "]", weightEbInst);
+            }
+        }
+
+        EDIFCellInst firstInputEbInst = requireCellInst(topCell, inputEbRootInstanceNames[0]);
+        int inputEbDataWidth = getPortWidth(firstInputEbInst.getCellType(), EB_S_DATA);
+        EDIFNet[] aDataNets = new EDIFNet[inputEbDataWidth];
+        for (int i = 0; i < inputEbDataWidth; i++) {
+            aDataNets[i] = topCell.createNet("a_eb_" + instanceName + "_data_" + i);
+            aDataNets[i].createPortInst(MM2S_M_DATA_A + "[" + i + "]", mm2sInst);
+        }
+        EDIFNet aValidNet = topCell.createNet("a_eb_" + instanceName + "_valid");
+        aValidNet.createPortInst(MM2S_M_VALID_A, mm2sInst);
+        for (String inputEbRootInstanceName : inputEbRootInstanceNames) {
+            EDIFCellInst inputEbInst = requireCellInst(topCell, inputEbRootInstanceName);
+            for (int i = 0; i < inputEbDataWidth; i++) {
+                claimPortInst(aDataNets[i], EB_S_DATA + "[" + i + "]", inputEbInst);
+            }
+            claimPortInst(aValidNet, EB_S_VALID, inputEbInst);
+            for (int b = 0; b < 4; b++) {
+                claimPortInst(gndNet, EB_S_WORD_INDEX + "[" + b + "]", inputEbInst);
+            }
+        }
+
+        return mm2sInst;
+    }
+
+    /**
+     * Adds an additional MM2S NOC channel that drives only the input EB
+     * (a_data / a_valid / a_rd_en, plus tying word_index to GND) for one
+     * per-SLR root. Use this for SLRs other than the primary, where the
+     * primary {@link #attachMM2SNOCChannel} drives weight EBs, accum_shift,
+     * output_wr_en, done, and the s2mm handshake. All other input ports of
+     * this secondary MM2S are tied to GND; outputs other than the input-EB
+     * fan-out are left unconnected.
+     */
+    public static EDIFCellInst attachSecondaryInputMM2SNOCChannel(Design design, String precompileDir,
+                                                                  String instanceName,
+                                                                  String inputEbRootInstanceName) {
+        EDIFCellInst mm2sInst = attachChannelBlackBox(design, precompileDir, new MM2SNOCChannel(), instanceName);
+        EDIFCell topCell = design.getNetlist().getTopCell();
+        EDIFCellInst inputEbInst = requireCellInst(topCell, inputEbRootInstanceName);
+        int inputEbDataWidth = getPortWidth(inputEbInst.getCellType(), EB_S_DATA);
+
+        // Data fan-out (one net per bit) from this secondary MM2S to its SLR's input EB root.
+        for (int i = 0; i < inputEbDataWidth; i++) {
+            EDIFNet net = topCell.createNet("a_eb_" + instanceName + "_data_" + i);
+            net.createPortInst(MM2S_M_DATA_A + "[" + i + "]", mm2sInst);
+            claimPortInst(net, EB_S_DATA + "[" + i + "]", inputEbInst);
+        }
+        EDIFNet validNet = topCell.createNet("a_eb_" + instanceName + "_valid");
+        validNet.createPortInst(MM2S_M_VALID_A, mm2sInst);
+        claimPortInst(validNet, EB_S_VALID, inputEbInst);
+
+        EDIFNet rdEnNet = topCell.createNet(instanceName + "_a_rd_en");
+        rdEnNet.createPortInst(MM2S_A_RD_EN, mm2sInst);
+        claimPortInst(rdEnNet, EB_RD_EN, inputEbInst);
+
+        EDIFNet gndNet = EDIFTools.getStaticNet(NetType.GND, topCell, design.getNetlist());
+        for (int b = 0; b < 4; b++) {
+            claimPortInst(gndNet, EB_S_WORD_INDEX + "[" + b + "]", inputEbInst);
+        }
+
+        // Tie any remaining unconnected MM2S input ports to GND so they don't dangle.
+        // (clk/rst_n were already connected by attachChannelBlackBox; the input-EB
+        // fan-out above wired m_data_a/m_valid_a/a_rd_en outputs.)
+        EDIFCell mm2sCell = mm2sInst.getCellType();
+        for (EDIFPort port : mm2sCell.getPorts()) {
+            if (!port.isInput()) continue;
+            for (int idx : port.getBitBlastedIndices()) {
+                String pname = port.getPortInstNameFromPort(idx);
+                EDIFPortInst existing = mm2sInst.getPortInst(pname);
+                if (existing == null || existing.getNet() == null) {
+                    gndNet.createPortInst(pname, mm2sInst);
+                }
+            }
+        }
+
+        return mm2sInst;
+    }
+
+    public static EDIFCellInst attachS2MMNOCChannel(Design design, String precompileDir, String instanceName,
+                                                    String drainHeadInstanceName) {
+        if (drainHeadInstanceName == null) {
+            throw new IllegalArgumentException("A drain head instance is required to attach S2MM");
+        }
+
+        EDIFCellInst s2mmInst = attachChannelBlackBox(design, precompileDir, new S2MMNOCChannel(), instanceName);
+        EDIFCell topCell = design.getNetlist().getTopCell();
+        EDIFCellInst drainHeadInst = requireCellInst(topCell, drainHeadInstanceName);
+        int accumBits = getPortWidth(drainHeadInst.getCellType(), DRAIN_M_TDATA);
+
+        connectBusPorts(topCell, "drain_to_" + instanceName + "_data",
+                drainHeadInst, DRAIN_M_TDATA, s2mmInst, S2MM_S_DATA, accumBits);
+        connectSingleBit(topCell, "drain_to_" + instanceName + "_valid",
+                drainHeadInst, DRAIN_M_TVALID, s2mmInst, S2MM_S_VALID);
+        connectSingleBit(topCell, "drain_to_" + instanceName + "_ready",
+                s2mmInst, S2MM_S_READY, drainHeadInst, DRAIN_M_TREADY);
+
+        return s2mmInst;
+    }
+
+    public static void connectIngressEgressChannelHandshake(Design design, String ingressInstanceName,
+                                                            String egressInstanceName) {
+        EDIFCell topCell = design.getNetlist().getTopCell();
+        EDIFCellInst ingressInst = requireCellInst(topCell, ingressInstanceName);
+        EDIFCellInst egressInst = requireCellInst(topCell, egressInstanceName);
+
+        connectSingleBit(topCell, "s2mm_start",
+                ingressInst, MM2S_S2MM_START, egressInst, S2MM_START);
+        connectSingleBit(topCell, "s2mm_done",
+                egressInst, S2MM_DONE, ingressInst, MM2S_S2MM_DONE);
+    }
+
     private static EDIFCell loadComponentCell(String precompileDir, RapidComponent component) {
         String dcpPath = precompileDir + File.separator
                 + component.getComponentName() + File.separator + SYNTH_DCP;
         return Design.readCheckpoint(dcpPath).getTopEDIFCell();
     }
 
+    private static EDIFCellInst attachChannelBlackBox(Design design, String precompileDir,
+                                                      RapidComponent component, String instanceName) {
+        EDIFCell channelCell = loadComponentCell(precompileDir, component);
+        EDIFNetlist netlist = design.getNetlist();
+        netlist.migrateCellAndSubCells(channelCell, true);
+        channelCell.makePrimitive();
+
+        EDIFCell topCell = netlist.getTopCell();
+        if (topCell.getCellInst(instanceName) != null) {
+            throw new RuntimeException("Channel instance already exists: " + instanceName);
+        }
+
+        EDIFCellInst channelInst = createBlackBox(topCell, instanceName, channelCell);
+        requireNet(topCell, "clk").createPortInst(component.getClkName(), channelInst);
+
+        String resetName = component.getResetName();
+        if (resetName != null) {
+            requireNet(topCell, "rst_n").createPortInst(resetName, channelInst);
+        }
+
+        return channelInst;
+    }
+
     private static EDIFCellInst createBlackBox(EDIFCell parent, String name, EDIFCell cellType) {
         EDIFCellInst inst = parent.createChildCellInst(name, cellType);
         inst.addProperty(EDIFCellInst.BLACK_BOX_PROP_VERSAL, "1");
         return inst;
+    }
+
+    private static EDIFCellInst requireCellInst(EDIFCell topCell, String instanceName) {
+        EDIFCellInst inst = topCell.getCellInst(instanceName);
+        if (inst == null) {
+            throw new RuntimeException("Instance '" + instanceName + "' not found in top-level netlist");
+        }
+        return inst;
+    }
+
+    private static EDIFPort requirePort(EDIFCell topCell, String portName) {
+        EDIFPort port = topCell.getPort(portName);
+        if (port == null) {
+            throw new RuntimeException("Top-level port '" + portName + "' not found");
+        }
+        return port;
+    }
+
+    private static EDIFNet requireNet(EDIFCell topCell, String netName) {
+        EDIFNet net = topCell.getNet(netName);
+        if (net == null) {
+            throw new RuntimeException("Top-level net '" + netName + "' not found");
+        }
+        return net;
+    }
+
+    /**
+     * Attaches an instance port to {@code newNet}, first detaching it from any
+     * other net it may already be on. Used when the netlist build phase already
+     * pre-wired a port (e.g. an inter-EB chain net) but a later pass needs to
+     * re-claim it (e.g. so MM2S can drive a per-SLR root EB instead).
+     */
+    private static EDIFPortInst claimPortInst(EDIFNet newNet, String portInstName, EDIFCellInst inst) {
+        EDIFPortInst existing = inst.getPortInst(portInstName);
+        if (existing != null && existing.getNet() != null) {
+            existing.getNet().removePortInst(existing);
+        }
+        return newNet.createPortInst(portInstName, inst);
     }
 
     private static void connectSingleBit(EDIFCell topCell, String netName,

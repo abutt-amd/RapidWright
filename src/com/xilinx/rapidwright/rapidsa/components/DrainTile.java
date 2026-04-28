@@ -91,8 +91,8 @@ public class DrainTile implements RapidComponent {
     public PBlock getPBlock() {
         Device device = Device.getDevice("xcv80-lsva4737-2MHP-e-S");
         return new PBlock(device,
-                "DSP_X0Y448:DSP_X1Y451 SLICE_X84Y896:SLICE_X99Y903 " +
-                        "IRI_QUAD_X58Y3612:IRI_QUAD_X59Y3643 DSP58_CPLX_X0Y448:DSP58_CPLX_X0Y451");
+                "DSP_X0Y438:DSP_X1Y441 IRI_QUAD_X58Y3532:IRI_QUAD_X59Y3563 " +
+                        "DSP58_CPLX_X0Y438:DSP58_CPLX_X0Y441 SLICE_X84Y876:SLICE_X99Y883");
     }
 
     @Override
