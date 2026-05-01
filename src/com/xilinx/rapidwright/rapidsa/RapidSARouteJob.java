@@ -53,16 +53,20 @@ public class RapidSARouteJob {
         System.out.println("** RapidSARouteJob: reading " + inputDcp);
         Design design = Design.readCheckpoint(inputDcp);
 
-        System.out.println("** RapidSARouteJob: PartialRouter (non-timing-driven, fixBoundingBox, useUTurnNodes)");
-        PartialRouter.routeDesignWithUserDefinedArguments(design, new String[]{
-                "--fixBoundingBox",
-                "--useUTurnNodes",
-                "--nonTimingDriven",
-        });
+        System.out.println("** RapidSARouteJob: PartialRouter (non-timing-driven, useUTurnNodes, softPreserve=true)");
+        PartialRouter.routeDesignWithUserDefinedArguments(design,
+                new String[]{
+                        "--useUTurnNodes",
+                        "--nonTimingDriven",
+                },
+                /*pinsToRoute=*/ null,
+                /*softPreserve=*/ true);
 
-        System.out.println("** RapidSARouteJob: HoldFixer on clock '" + clkName + "'");
-        HoldFixer holdFixer = new HoldFixer(design, clkName);
-        holdFixer.fixHoldViolations();
+        RapidSA.routeClockNetIfUnrouted(design, clkName);
+
+        // System.out.println("** RapidSARouteJob: HoldFixer on clock '" + clkName + "'");
+        // HoldFixer holdFixer = new HoldFixer(design, clkName);
+        // holdFixer.fixHoldViolations();
 
         System.out.println("** RapidSARouteJob: writing " + outputDcp);
         design.writeCheckpoint(outputDcp);

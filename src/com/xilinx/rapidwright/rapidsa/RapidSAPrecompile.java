@@ -26,6 +26,9 @@ package com.xilinx.rapidwright.rapidsa;
 import com.xilinx.rapidwright.design.Design;
 import com.xilinx.rapidwright.design.blocks.PBlock;
 import com.xilinx.rapidwright.design.blocks.PBlockSide;
+import com.xilinx.rapidwright.design.tools.ArrayBuilder;
+import com.xilinx.rapidwright.design.tools.InlineFlopTools;
+import com.xilinx.rapidwright.design.tools.PBlockStaticNetFixer;
 import com.xilinx.rapidwright.device.Part;
 import com.xilinx.rapidwright.edif.EDIFCell;
 import com.xilinx.rapidwright.edif.EDIFCellInst;
@@ -35,7 +38,11 @@ import com.xilinx.rapidwright.edif.EDIFNetlist;
 import com.xilinx.rapidwright.edif.EDIFPort;
 import com.xilinx.rapidwright.edif.EDIFTools;
 import com.xilinx.rapidwright.rapidsa.components.DrainTile;
+import com.xilinx.rapidwright.rapidsa.components.EdgeBufferTile;
+import com.xilinx.rapidwright.rapidsa.components.GEMMTile;
+import com.xilinx.rapidwright.rapidsa.components.MM2SNOCChannel;
 import com.xilinx.rapidwright.rapidsa.components.RapidComponent;
+import com.xilinx.rapidwright.rapidsa.components.S2MMNOCChannel;
 import com.xilinx.rapidwright.util.ArrayBuilderSLRCrossingCreator;
 import com.xilinx.rapidwright.util.FileTools;
 import com.xilinx.rapidwright.util.PerformanceExplorer;
@@ -80,14 +87,23 @@ public class RapidSAPrecompile {
     private static final List<RouterDirective> DEFAULT_ROUTE_DIRECTIVES = Arrays.asList(RouterDirective.Default, RouterDirective.Explore);
     private static final String DEFAULT_VIVADO = "vivado";
 
+    /**
+     * When true, both the per-component PerformanceExplorer pass and the
+     * SLR-crossing PerformanceExplorer pass reuse any prior results found in
+     * their run directories instead of re-launching Vivado. The
+     * PerformanceExplorer run directory is also kept (not deleted) so the
+     * results survive across runs. Toggle to false to force a fresh run.
+     */
+    private static final boolean REUSE_PE_RESULTS = true;
+
     private static final List<RapidComponent> COMPONENTS = Collections.unmodifiableList(
             Arrays.asList(
-//                    new GEMMTile(4, 4)
-//                    new EdgeBufferTile(4, EdgeBufferTile.Type.WEIGHT),
-//                    new EdgeBufferTile(4, EdgeBufferTile.Type.INPUT)
-                    new DrainTile(4, 16)
-//                    new MM2SNOCChannel()
-//                    new S2MMNOCChannel()
+                    new GEMMTile(4, 4),
+                    new EdgeBufferTile(4, EdgeBufferTile.Type.WEIGHT),
+                    new EdgeBufferTile(4, EdgeBufferTile.Type.INPUT),
+                    new DrainTile(4, 16),
+                    new MM2SNOCChannel(),
+                    new S2MMNOCChannel()
             )
     );
 
@@ -146,6 +162,12 @@ public class RapidSAPrecompile {
                 Design.readCheckpoint(pnrDcpName), false);
         String crossingPath = slrCrossingDir + File.separator + SLR_CROSSING_DCP_NAME;
         Design d = Design.readCheckpoint(pnrDcpName);
+        // The SLR-crossing PE run directory lives inside slrCrossingDir; wipe
+        // it when REUSE_PE_RESULTS is false so prior results don't leak in.
+        if (!REUSE_PE_RESULTS) {
+            FileTools.deleteFolderContents(slrCrossingDir + File.separator + ArrayBuilderSLRCrossingCreator.PE_RUN_DIR);
+        }
+
         ArrayBuilderSLRCrossingCreator.createSLRCrossing(
                 Design.readCheckpoint(pnrDcpName),
                 crossingTopDesign,
@@ -154,7 +176,8 @@ public class RapidSAPrecompile {
                 SLR_CROSSING_BOTTOM_INST_NAME,
                 crossingPath,
                 component.getSLRCrossingPBlock(),
-                clkPeriod);
+                clkPeriod,
+                REUSE_PE_RESULTS);
     }
 
     private static EDIFDirection getPortDirection(EDIFPort port) {
@@ -337,7 +360,9 @@ public class RapidSAPrecompile {
 
             Path outputLog = Paths.get(compOutputDir, "synth.log");
             System.out.println("Running Vivado");
-            VivadoTools.runTcl(outputLog, Paths.get(scriptName), true);
+            if (!REUSE_PE_RESULTS) {
+                VivadoTools.runTcl(outputLog, Paths.get(scriptName), true);
+            }
             System.out.println("Vivado finished");
 
             String synthDcpName = compOutputDir + File.separator + SYNTH_DCP_NAME;
@@ -346,7 +371,9 @@ public class RapidSAPrecompile {
             EDIFTools.ensurePreservedInterfaceVivado(d.getNetlist());
 
             String peRunDir = compOutputDir + File.separator + PE_RUN_DIR;
-            FileTools.deleteFolderContents(peRunDir);
+            if (!REUSE_PE_RESULTS) {
+                FileTools.deleteFolderContents(peRunDir);
+            }
             PerformanceExplorer pe = new PerformanceExplorer(d, peRunDir, component.getClkName(), clkPeriod);
 
             pe.setMinClockUncertainty(DEFAULT_MIN_CLK_UNCERT);
@@ -361,7 +388,7 @@ public class RapidSAPrecompile {
             pe.setBaseClockUncertainty(0.3);
             pe.setAddEDIFAndMetadata(true);
             pe.setGetBestPerPBlock(true);
-            pe.setReusePreviousResults(false);
+            pe.setReusePreviousResults(REUSE_PE_RESULTS);
             pe.setEnsureExternalRoutability(true);
             pe.setLockPlacement(true);
 
@@ -388,7 +415,112 @@ public class RapidSAPrecompile {
                 e.printStackTrace();
             }
 
+            // Clean up the freshly-produced pnr.dcp before any downstream
+            // step (SLR-crossing artifact build, RapidSA module load) consumes
+            // it: pblock-clean the static nets, strip the inline-flop
+            // port-anchor harness, and remove BUFGs. This keeps each
+            // component's pnr.dcp ready to be used as a Module template
+            // without further surgery.
+            cleanPnrCheckpoint(compOutputDir + File.separator + PNR_DCP_NAME);
+
             compileSLRCrossingArtifacts(compOutputDir, part, component, clkPeriod);
         }
+    }
+
+    /**
+     * Loads a freshly-produced precompile {@code pnr.dcp}, runs the
+     * pblock-aware static-net cleanup, removes the inline-flop port-anchor
+     * harness, removes BUFGs, and writes the result back in place. Each
+     * component's {@code pnr.dcp} on disk is then a clean module template
+     * suitable for direct {@code Module} construction.
+     */
+    private static void cleanPnrCheckpoint(String pnrDcpPath) {
+        System.out.println("** RapidSAPrecompile: cleaning " + pnrDcpPath);
+        Design design = Design.readCheckpoint(pnrDcpPath);
+
+        int inlineBefore = countInlineFlops(design);
+        int bufgsBefore = countBufgs(design);
+        System.out.println("** RapidSAPrecompile[clean]: pre  inlineFlops=" + inlineBefore
+                + " bufgs=" + bufgsBefore);
+
+        PBlockStaticNetFixer.fix(design);
+        InlineFlopTools.removeInlineFlops(design);
+        ArrayBuilder.removeBUFGs(design);
+
+        int mergedPins = mergeOrphanStaticTieNetsIntoGlobals(design);
+        if (mergedPins > 0) {
+            System.out.println("** RapidSAPrecompile[clean]: merged " + mergedPins
+                    + " orphan static-tie SitePinInsts into design VCC/GND");
+        }
+
+        int inlineAfter = countInlineFlops(design);
+        int bufgsAfter = countBufgs(design);
+        System.out.println("** RapidSAPrecompile[clean]: post inlineFlops=" + inlineAfter
+                + " bufgs=" + bufgsAfter);
+
+        com.xilinx.rapidwright.design.DesignTools.updatePinsIsRouted(design);
+        com.xilinx.rapidwright.util.ReportRouteStatusResult rrs =
+                com.xilinx.rapidwright.util.ReportRouteStatus.reportRouteStatus(design);
+        System.out.println(rrs.toString("Route Status: " + pnrDcpPath));
+
+        // Print one block per net that has any unrouted sink, sorted by name.
+        // Clock nets are skipped — they're routed by Vivado/RWRoute's clock
+        // router, and their unrouted-sink count is not actionable here.
+        // Use both NetTools.isGlobalClock (BUFG-source check) and the design's
+        // XDC clock-net list, since precompile clk nets driven by top-level
+        // ports have no SitePinInst source and the BUFG check returns false.
+        java.util.Set<String> clockNetNames = new java.util.HashSet<>(
+                com.xilinx.rapidwright.design.xdc.ConstraintTools.getClockNetsFromXDC(design));
+        java.util.List<com.xilinx.rapidwright.design.Net> sortedNets =
+                new java.util.ArrayList<>(design.getNets());
+        sortedNets.sort(java.util.Comparator.comparing(com.xilinx.rapidwright.design.Net::getName));
+        int netsWithUnrouted = 0;
+        for (com.xilinx.rapidwright.design.Net n : sortedNets) {
+            if (com.xilinx.rapidwright.design.NetTools.isGlobalClock(n)) continue;
+            if (clockNetNames.contains(n.getName())) continue;
+            java.util.List<com.xilinx.rapidwright.design.SitePinInst> bad = new java.util.ArrayList<>();
+            for (com.xilinx.rapidwright.design.SitePinInst spi : n.getPins()) {
+                if (!spi.isOutPin() && !spi.isRouted()) bad.add(spi);
+            }
+            if (bad.isEmpty()) continue;
+            netsWithUnrouted++;
+            boolean hasLogical = design.getNetlist().getHierNetFromName(n.getName()) != null;
+            System.out.println("    " + n.getName() + "  (" + bad.size()
+                    + " unrouted sinks, edifNet=" + (hasLogical ? "yes" : "NO") + ")");
+            for (com.xilinx.rapidwright.design.SitePinInst spi : bad) {
+                System.out.println("        " + spi + "  connectedNode=" + spi.getConnectedNode());
+            }
+        }
+        if (netsWithUnrouted > 0) {
+            System.out.println("** RapidSAPrecompile[clean]: " + netsWithUnrouted
+                    + " net(s) with unrouted sinks");
+        }
+
+        design.writeCheckpoint(pnrDcpPath);
+        System.out.println("** RapidSAPrecompile: wrote cleaned " + pnrDcpPath);
+    }
+
+    private static int mergeOrphanStaticTieNetsIntoGlobals(Design design) {
+        return PBlockStaticNetFixer.mergeOrphanStaticTieNetsIntoGlobals(design);
+    }
+
+    private static int countInlineFlops(Design design) {
+        int n = 0;
+        for (com.xilinx.rapidwright.edif.EDIFLibrary lib : design.getNetlist().getLibraries()) {
+            for (com.xilinx.rapidwright.edif.EDIFCell cell : lib.getCells()) {
+                for (EDIFCellInst inst : cell.getCellInsts()) {
+                    if (inst.getName().endsWith(InlineFlopTools.INLINE_SUFFIX)) n++;
+                }
+            }
+        }
+        return n;
+    }
+
+    private static int countBufgs(Design design) {
+        int n = 0;
+        for (com.xilinx.rapidwright.design.Cell c : design.getCells()) {
+            if (c.getType().equals("BUFG") || c.getType().equals("BUFGCE")) n++;
+        }
+        return n;
     }
 }

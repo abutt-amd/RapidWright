@@ -538,6 +538,25 @@ public class InlineFlopTools {
             }
         }
 
+        // Strip orphan physical Nets whose name still carries the inline-flop
+        // suffix. The EDIF logical net is removed above (top.removeNet), but
+        // the underlying physical Net object and its SitePinInsts can persist;
+        // write_checkpoint drops them from the DCP, but readCheckpoint
+        // resurrects them from per-pin owner data, causing the orphan to ride
+        // into Module relocation as a Net with edifNet=NO and unrouted sinks.
+        List<Net> orphanNets = new ArrayList<>();
+        for (Net n : design.getNets()) {
+            if (n.getName().endsWith(INLINE_SUFFIX)) {
+                orphanNets.add(n);
+            }
+        }
+        for (Net n : orphanNets) {
+            for (SitePinInst spi : new ArrayList<>(n.getPins())) {
+                n.removePin(spi);
+            }
+            design.removeNet(n);
+        }
+
         removeInlineFlopConstraints(design);
     }
 

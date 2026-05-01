@@ -61,7 +61,7 @@ import java.util.Map;
 import java.util.Set;
 
 public class ArrayBuilderSLRCrossingCreator {
-    private static final String PE_RUN_DIR = "PerformanceExplorer";
+    public static final String PE_RUN_DIR = "PerformanceExplorer";
     private static final List<String> INPUT_KERNEL_OPTS = Arrays.asList("k", "kernel");
     private static final List<String> CROSSING_DESIGN_OPTS = Arrays.asList("c", "crossing");
     private static final List<String> TOP_INST_NAME_OPTS = Arrays.asList("t", "top-inst");
@@ -213,14 +213,14 @@ public class ArrayBuilderSLRCrossingCreator {
                                          Map<EDIFPort, PBlockSide> sideMap,
                                          String topInstName, String bottomInstName,
                                          String outputPath) {
-        createSLRCrossing(kernelDesign, topDesign, sideMap, topInstName, bottomInstName, outputPath, null, 1.6);
+        createSLRCrossing(kernelDesign, topDesign, sideMap, topInstName, bottomInstName, outputPath, null, 1.6, false);
     }
 
     public static void createSLRCrossing(Design kernelDesign, Design topDesign,
                                          Map<EDIFPort, PBlockSide> sideMap,
                                          String topInstName, String bottomInstName,
                                          String outputPath, PBlock pblockOverride) {
-        createSLRCrossing(kernelDesign, topDesign, sideMap, topInstName, bottomInstName, outputPath, pblockOverride, 1.6);
+        createSLRCrossing(kernelDesign, topDesign, sideMap, topInstName, bottomInstName, outputPath, pblockOverride, 1.6, false);
     }
 
     public static void createSLRCrossing(Design kernelDesign, Design topDesign,
@@ -228,6 +228,14 @@ public class ArrayBuilderSLRCrossingCreator {
                                          String topInstName, String bottomInstName,
                                          String outputPath, PBlock pblockOverride,
                                          double clkPeriod) {
+        createSLRCrossing(kernelDesign, topDesign, sideMap, topInstName, bottomInstName, outputPath, pblockOverride, clkPeriod, false);
+    }
+
+    public static void createSLRCrossing(Design kernelDesign, Design topDesign,
+                                         Map<EDIFPort, PBlockSide> sideMap,
+                                         String topInstName, String bottomInstName,
+                                         String outputPath, PBlock pblockOverride,
+                                         double clkPeriod, boolean reusePreviousResults) {
         if (!kernelDesign.getDevice().getName().equals("xcv80")) {
             System.out.println("SLRCrossing creator currently only tested for xcv80");
         }
@@ -371,7 +379,7 @@ public class ArrayBuilderSLRCrossingCreator {
         EDIFTools.ensurePreservedInterfaceVivado(topDesign.getNetlist());
 
         String runDirectory = Paths.get(outputPath).getParent().resolve(PE_RUN_DIR).toString();
-        explorePerformance(topDesign, runDirectory, false, clkPeriod);
+        explorePerformance(topDesign, runDirectory, reusePreviousResults, clkPeriod);
         Design bestDesign = Design.readCheckpoint(Paths.get(runDirectory, "pblock0_best.dcp").toString());
         EDIFTools.removeVivadoBusPreventionAnnotations(bestDesign.getNetlist());
         InlineFlopTools.removeInlineFlops(bestDesign);
