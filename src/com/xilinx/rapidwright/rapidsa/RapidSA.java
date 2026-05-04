@@ -30,7 +30,6 @@ import com.xilinx.rapidwright.design.ModuleInst;
 import com.xilinx.rapidwright.design.Net;
 import com.xilinx.rapidwright.design.RelocatableTileRectangle;
 import com.xilinx.rapidwright.design.SiteInst;
-import com.xilinx.rapidwright.design.SitePinInst;
 import com.xilinx.rapidwright.design.tools.ArrayBuilder;
 import com.xilinx.rapidwright.design.tools.ArrayBuilderConfig;
 import com.xilinx.rapidwright.design.tools.FlopTreeTools;
@@ -54,8 +53,6 @@ import com.xilinx.rapidwright.rapidsa.components.GEMMTile;
 import com.xilinx.rapidwright.rapidsa.components.MM2SNOCChannel;
 import com.xilinx.rapidwright.rapidsa.components.RapidComponent;
 import com.xilinx.rapidwright.rapidsa.components.S2MMNOCChannel;
-import com.xilinx.rapidwright.rwroute.GlobalSignalRouting;
-import com.xilinx.rapidwright.rwroute.NodeStatus;
 import com.xilinx.rapidwright.rwroute.PartialCUFR;
 import com.xilinx.rapidwright.util.Pair;
 import com.xilinx.rapidwright.util.VivadoTools;
@@ -87,8 +84,6 @@ public class RapidSA {
         parser.accepts("cols", "Number of GEMM tile columns in the systolic array").withRequiredArg().ofType(Integer.class).defaultsTo(8);
         parser.accepts("route", "After building the array, run RWRoute partial route + HoldFixer in-process and write a routed DCP");
         parser.accepts("vivado-route", "After building the array, shell out to Vivado to route the design and write a routed DCP");
-        parser.accepts("lsf-route", "After building the array, submit RWRoute partial route + HoldFixer as an LSF (bsub) job and wait for it to complete; useful when the local host doesn't have enough RAM");
-        parser.accepts("lsf-bsub-opts", "Override the default bsub options used by --lsf-route (defaults to '-n 4 -R \"rusage[mem=64000]\" -W 6:00')").withRequiredArg().ofType(String.class);
         parser.accepts("report-timing", "After routing, open the routed DCP in Vivado and run report_timing_summary + report_timing -nworst 10. Combined with --vivado-route in a single Vivado session.");
         parser.accepts("flop-tree-depth", "Flop tree depth for control fanout (default: scales with array size)").withRequiredArg().ofType(Integer.class);
         parser.accepts("max-depth-per-slr", "Max flop tree depth within a single SLR (default: scales with flop-tree-depth)").withRequiredArg().ofType(Integer.class);
@@ -105,12 +100,6 @@ public class RapidSA {
             return;
         }
 
-//        Design d = Design.readCheckpoint("/group/zircon2/abutt/RapidSA/MM2SNOCChannel/PerformanceExplorer/Explore_Explore_0.25_pblock0_SLICE_X322Y868-/routed.dcp");
-//        d.getNOCDesign().clearSolution();
-//        d.writeCheckpoint("/group/zircon2/abutt/RapidSA/MM2SNOCChannel/pnr.dcp");
-//        if (true)
-//        return;
-
         if (options.has("precompile-slr-crossings-only")) {
             RapidSAPrecompile.precompileRapidSAComponents("RapidSA", part, 2.0, true);
             return;
@@ -125,9 +114,6 @@ public class RapidSA {
         int nCols = (Integer) options.valueOf("cols");
 
         Design sa = RapidSANetlistBuilder.createSystolicArrayNetlist(nRows, nCols, partName, "RapidSA");
-
-//        sa.getNetlist().exportEDIF("test.edf");
-//        sa.writeCheckpoint("blackbox_netlist.dcp");
 
         GEMMTile tile = new GEMMTile(4, 4);
 
@@ -167,83 +153,19 @@ public class RapidSA {
         ab.initializeArrayBuilder();
 
         ab.createArray();
-        countOrphanStaticTieNets(ab.getArray(), "after createArray");
-
-        // [diag] check whether per-module static-net PIPs survived relocation
-        // into the array's global GND/VCC.
-        {
-            Design arr = ab.getArray();
-            System.out.println("[diag] array GND pins=" + arr.getGndNet().getPins().size()
-                    + " PIPs=" + arr.getGndNet().getPIPs().size());
-            System.out.println("[diag] array VCC pins=" + arr.getVccNet().getPins().size()
-                    + " PIPs=" + arr.getVccNet().getPIPs().size());
-            if (!arr.getModuleInsts().isEmpty()) {
-                ModuleInst sample = arr.getModuleInsts().iterator().next();
-                System.out.println("[diag] sample MI " + sample.getName()
-                        + " gndPIPs=" + sample.getUsedStaticPIPs(arr.getGndNet()).size()
-                        + " vccPIPs=" + sample.getUsedStaticPIPs(arr.getVccNet()).size());
-            }
-        }
 
         // Place Weight Edge Buffer tiles above the array
         Module weightEbModule = loadRelocatableModule("RapidSA", new EdgeBufferTile(8, EdgeBufferTile.Type.WEIGHT), ab.getArray());
         placeWeightDCUTiles(ab, nCols, weightEbModule);
-        countOrphanStaticTieNets(ab.getArray(), "after placeWeightDCUTiles");
-        mergeAndReportOrphans(ab.getArray(), "after placeWeightDCUTiles");
 
         // Place Input Edge Buffer tiles right of the array
         Module inputEbModule = loadRelocatableModule("RapidSA", new EdgeBufferTile(8, EdgeBufferTile.Type.INPUT), ab.getArray());
         placeInputDCUTiles(ab, nRows, inputEbModule);
-        countOrphanStaticTieNets(ab.getArray(), "after placeInputDCUTiles");
-        mergeAndReportOrphans(ab.getArray(), "after placeInputDCUTiles");
 
         // Place DrainTiles below the array
         int accumCount = 4 * 4; // nCols * nRows for GEMM tile accumulator count
         Module drainModule = loadRelocatableModule("RapidSA", new DrainTile(accumCount, 8), ab.getArray());
         placeDrainTiles(ab, nCols, drainModule, accumCount);
-        countOrphanStaticTieNets(ab.getArray(), "after placeDrainTiles");
-        mergeAndReportOrphans(ab.getArray(), "after placeDrainTiles");
-
-        // [diag] post-relocation snapshot for the drain row — count GND
-        // SitePinInsts on SLICEMs across all placed drain instances and dump
-        // the first one's pins. Compare against the [precompile-gnd] line for
-        // DrainTile to see whether sinks survived relocation (Case A) or were
-        // never there (Case B).
-        {
-            Net arrGnd = ab.getArray().getGndNet();
-            int slicemSinksInDrains = 0;
-            int slicemSitesInDrains = 0;
-            java.util.Set<SiteInst> slicemSeen = new java.util.HashSet<>();
-            for (ModuleInst mi : ab.getArray().getModuleInsts()) {
-                if (!mi.getName().startsWith("drain_x")) continue;
-                for (SiteInst si : mi.getSiteInsts()) {
-                    if (si.getSite() == null) continue;
-                    if (si.getSiteTypeEnum() == null
-                            || !si.getSiteTypeEnum().name().startsWith("SLICEM")) continue;
-                    if (slicemSeen.add(si)) slicemSitesInDrains++;
-                }
-            }
-            for (SitePinInst spi : arrGnd.getPins()) {
-                if (spi.isOutPin()) continue;
-                if (slicemSeen.contains(spi.getSiteInst())) slicemSinksInDrains++;
-            }
-            System.out.println("[postreloc-drain-gnd] " + slicemSitesInDrains + " SLICEMs across drain instances; "
-                    + slicemSinksInDrains + " GND sink pins on those SLICEMs");
-            // Dump pins for one drain SLICEM that actually has GND pins
-            // (the first SLICEM in the instance set may have none).
-            java.util.Map<SiteInst, java.util.List<SitePinInst>> sinksBySite = new java.util.HashMap<>();
-            for (SitePinInst spi : arrGnd.getPins()) {
-                if (spi.isOutPin() || !slicemSeen.contains(spi.getSiteInst())) continue;
-                sinksBySite.computeIfAbsent(spi.getSiteInst(), k -> new java.util.ArrayList<>()).add(spi);
-            }
-            if (!sinksBySite.isEmpty()) {
-                Map.Entry<SiteInst, java.util.List<SitePinInst>> sample = sinksBySite.entrySet().iterator().next();
-                System.out.println("[postreloc-drain-gnd] sample SLICEM " + sample.getKey().getSiteName() + " GND pins:");
-                for (SitePinInst spi : sample.getValue()) {
-                    System.out.println("    " + spi + " connectedNode=" + spi.getConnectedNode());
-                }
-            }
-        }
 
         Design arrayDesign = ab.getArray();
 
@@ -266,14 +188,6 @@ public class RapidSA {
             RapidSANetlistBuilder.attachSecondaryInputMM2SNOCChannel(arrayDesign, "RapidSA",
                     "mm2s_" + i, inputEbRoots[i]);
         }
-        countOrphanStaticTieNets(arrayDesign, "after attach* (S2MM, MM2S, secondary MM2S)");
-
-        // Snapshot the fully wired black-box netlist (GEMM tiles + EBs + drains
-        // are placed by createArray, but MM2S/S2MM/secondary MM2S have just been
-        // added as wired black boxes and aren't yet placed). Useful for inspecting
-        // the netlist topology before peripheral placement / flatten / flop-tree.
-//        arrayDesign.writeCheckpoint("wired_blackbox_netlist.dcp");
-//        System.out.println("** Wrote wired_blackbox_netlist.dcp (post-attach, pre-placement)");
 
         // Look up the SLR each input EB root landed in, so we can place the
         // secondary MM2S(es) in the same SLR as the EB they drive.
@@ -381,14 +295,9 @@ public class RapidSA {
                         .getCorresponding(mi.getPlacement().getTile(), mod.getAnchor().getTile()));
             }
         }
-        System.out.println("** Inserted-flop placement no-go list: " + noGoBboxes.size()
-                + " bboxes (placed array tiles + post-flatten ModuleInsts)");
 
         arrayDesign.flattenDesign();
         EDIFTools.uniqueifyNetlist(arrayDesign);
-
-        // TEMP DIAGNOSTIC: find which net has multiple sources
-        debugFindMultiSourceNets(arrayDesign);
 
         FlopTreeTools.insertFlopTreeForNet(arrayDesign, "sa_accum_shift", "clk", flopTreeDepth, maxDepthPerSLR, noGoBboxes);
         FlopTreeTools.insertFlopTreeForNet(arrayDesign, "output_wr_en", "clk", flopTreeDepth, maxDepthPerSLR, noGoBboxes);
@@ -417,30 +326,12 @@ public class RapidSA {
         for (SiteInst si : chainSiteInsts) {
             si.routeSite();
         }
-        countOrphanStaticTieNets(arrayDesign, "after FlopTreeTools insertions");
 
         // Insert the top-level BUFGCE just before write/route, so it doesn't
         // perturb the earlier peripheral placement (which iterates the design's
         // SiteInsts to derive array top/bottom row constraints) and so the
         // BUFGCE site doesn't sit inside the design throughout the build.
         insertTopLevelBUFGCE(arrayDesign);
-        countOrphanStaticTieNets(arrayDesign, "after insertTopLevelBUFGCE");
-
-        // [diag] dump every SitePinInst on the bufg SiteInst across all nets,
-        // with their connectedNode, so we can verify that RapidWright created
-        // the BUFGCE pins on the same physical nodes Vivado expects (e.g. the
-        // CLK_BUFGCE_<n>_CE_PIN that report_route_status complains about).
-        SiteInst bufgSiteInst = arrayDesign.getSiteInstFromSiteName("BUFGCE_X2Y0");
-        if (bufgSiteInst != null) {
-            for (SitePinInst spi : bufgSiteInst.getSitePinInsts()) {
-                Net n = spi.getNet();
-                System.out.println("[bufg-pin] " + spi
-                        + " net=" + (n == null ? "<null>" : n.getName())
-                        + " connectedNode=" + spi.getConnectedNode());
-            }
-        } else {
-            System.out.println("[bufg-pin] no SiteInst at BUFGCE_X2Y0!");
-        }
 
         // Add clock constraint
         arrayDesign.addXDCConstraint("create_clock -period 2.0 -name clk [get_ports clk_in]");
@@ -459,69 +350,8 @@ public class RapidSA {
                     },
                     /*pinsToRoute=*/ null,
                     /*softPreserve=*/ false);
-            // RWRoute's createPossiblePinsToStaticNets may have re-attached
-            // SitePinInsts to per-cell orphan static-tie nets — reparent them
-            // onto the design's actual VCC/GND so report_route_status sees
-            // them under the right net.
-            mergeAndReportOrphans(arrayDesign, "after RWRoute");
-            routeClockNetIfUnrouted(arrayDesign, "clk");
             // HoldFixer holdFixer = new HoldFixer(arrayDesign, "clk");
             // holdFixer.fixHoldViolations();
-
-//            DesignTools.updatePinsIsRouted(arrayDesign);
-//            com.xilinx.rapidwright.util.ReportRouteStatusResult rrs =
-//                    com.xilinx.rapidwright.util.ReportRouteStatus.reportRouteStatus(arrayDesign);
-//            System.out.println(rrs.toString("RapidWright Route Status (post-RWRoute)"));
-//            if (!rrs.isFullyRouted()) {
-//                System.out.println("** WARNING: design is NOT fully routed (unroutedNets="
-//                        + rrs.unroutedNets + ", routingErrors=" + rrs.netsWithRoutingErrors
-//                        + ", someUnroutedPins=" + rrs.netsWithSomeUnroutedPins
-//                        + ", resourceConflicts=" + rrs.netsWithResourceConflicts + ")");
-//
-//                // Dump every net with unrouted sinks, sorted by net name. One
-//                // line per net + connectedNode for each missing sink. Helps
-//                // distinguish "all DSP58 internal tie-downs" vs "macro pin
-//                // mapping mismatches" vs "real signal-net failures".
-//                String dumpFile = baseDcpName + "_unrouted_nets.txt";
-//                int netsWithUnrouted = 0;
-//                int totalUnroutedPins = 0;
-//                java.util.Map<String, Integer> reasonHistogram = new java.util.TreeMap<>();
-//                // Skip clock and reset nets — clock is handled by the clock
-//                // router; reset is intentionally left dangling for AVED to
-//                // drive at integration time.
-//                java.util.Set<String> skipNetNames = new java.util.HashSet<>(
-//                        java.util.Arrays.asList("clk", "clk_in", "rst_n", "rst", "reset", "reset_n"));
-//                try (java.io.PrintWriter pw = new java.io.PrintWriter(dumpFile)) {
-//                    java.util.List<Net> sorted = new java.util.ArrayList<>(arrayDesign.getNets());
-//                    sorted.sort(java.util.Comparator.comparing(Net::getName));
-//                    for (Net n : sorted) {
-//                        if (com.xilinx.rapidwright.design.NetTools.isGlobalClock(n)) continue;
-//                        if (skipNetNames.contains(n.getName())) continue;
-//                        java.util.List<SitePinInst> bad = new java.util.ArrayList<>();
-//                        for (SitePinInst spi : n.getPins()) {
-//                            if (!spi.isOutPin() && !spi.isRouted()) bad.add(spi);
-//                        }
-//                        if (bad.isEmpty()) continue;
-//                        netsWithUnrouted++;
-//                        totalUnroutedPins += bad.size();
-//                        boolean hasLogical = arrayDesign.getNetlist()
-//                                .getHierNetFromName(n.getName()) != null;
-//                        pw.println(n.getName() + "  (" + bad.size() + " unrouted sinks, edifNet="
-//                                + (hasLogical ? "yes" : "NO") + ")");
-//                        for (SitePinInst spi : bad) {
-//                            String node = String.valueOf(spi.getConnectedNode());
-//                            pw.println("    " + spi + "  connectedNode=" + node);
-//                            String key = n.isStaticNet() ? "static" : "signal";
-//                            reasonHistogram.merge(key, 1, Integer::sum);
-//                        }
-//                    }
-//                } catch (java.io.IOException e) {
-//                    throw new RuntimeException("Failed to write " + dumpFile, e);
-//                }
-//                System.out.println("** Dumped " + totalUnroutedPins + " unrouted sinks across "
-//                        + netsWithUnrouted + " nets to " + dumpFile);
-//                System.out.println("** Unrouted sink breakdown: " + reasonHistogram);
-//            }
 
             arrayDesign.writeCheckpoint(baseDcpName + "_routed.dcp");
             System.out.println("** Wrote " + baseDcpName + "_routed.dcp");
@@ -545,10 +375,6 @@ public class RapidSA {
                     + (options.has("report-timing") ? " (with report-timing in same session)" : ""));
             VivadoTools.runTcl(tclLog, tcl.toString(), true);
             System.out.println("** Wrote " + outputDcp);
-        }
-
-        if (options.has("lsf-route")) {
-            runLsfRoute(baseDcpName, options);
         }
 
         // Standalone report-timing pass (skipped if --vivado-route already
@@ -602,85 +428,6 @@ public class RapidSA {
         System.out.println("** Running Vivado report_timing on " + dcp);
         VivadoTools.runTcl(tclLog, tcl, true);
         System.out.println("** Timing report log: " + tclLog);
-    }
-
-    /** Single-quote a string for safe inclusion in a `sh -c` command line. */
-    private static String shellEscape(String s) {
-        return "'" + s.replace("'", "'\\''") + "'";
-    }
-
-    /**
-     * Submits an RWRoute partial route + HoldFixer pass on the unrouted DCP via
-     * bsub and blocks (using {@code bsub -K}) until the LSF job finishes. The
-     * routed DCP lands at {@code <baseDcpName>_lsf_routed.dcp}.
-     */
-    private static void runLsfRoute(String baseDcpName, joptsimple.OptionSet options) {
-        Path workdir = Paths.get(".").toAbsolutePath().normalize();
-        Path inputDcp = workdir.resolve(baseDcpName + ".dcp");
-        Path outputDcp = workdir.resolve(baseDcpName + "_lsf_routed.dcp");
-        Path stdoutLog = workdir.resolve(baseDcpName + "_lsf_route.out");
-        Path stderrLog = workdir.resolve(baseDcpName + "_lsf_route.err");
-
-        String defaultBsubOpts = "-n 4 -R rusage[mem=64000] -W 6:00";
-        String bsubOpts = options.has("lsf-bsub-opts")
-                ? (String) options.valueOf("lsf-bsub-opts")
-                : defaultBsubOpts;
-
-        String launcher = com.xilinx.rapidwright.util.FileTools.getRapidWrightPath()
-                + java.io.File.separator + "bin" + java.io.File.separator + "rapidwright";
-        String jvmHeap = "60g";
-
-        // Write a small wrapper script next to the DCPs. We need this (rather
-        // than passing a one-liner via `sh -c`) because some LSF hosts have a
-        // broken profile-sourcing chain (e.g. Vivado settings64.sh fails when
-        // awk isn't on the default PATH), which kills the bsub shell before
-        // our launcher ever runs. The wrapper:
-        //   1. Sets PATH so basic utilities are findable BEFORE
-        //   2. Sourcing .bashrc (so Vivado/Java env vars get set up properly)
-        //   3. Sets _JAVA_OPTIONS for the heap
-        //   4. Execs the launcher
-        Path wrapperScript = workdir.resolve(baseDcpName + "_lsf_route.sh");
-        StringBuilder sb = new StringBuilder();
-        sb.append("#!/bin/bash\n");
-        sb.append("export PATH=/usr/bin:/bin:$PATH\n");
-        sb.append("[ -f \"$HOME/.bashrc\" ] && source \"$HOME/.bashrc\"\n");
-        sb.append("export _JAVA_OPTIONS=\"-Xmx").append(jvmHeap).append("\"\n");
-        sb.append("exec ").append(launcher)
-                .append(" com.xilinx.rapidwright.rapidsa.RapidSARouteJob ")
-                .append(inputDcp).append(' ')
-                .append(outputDcp).append(" clk\n");
-        try {
-            java.nio.file.Files.write(wrapperScript, sb.toString().getBytes());
-            wrapperScript.toFile().setExecutable(true);
-        } catch (java.io.IOException e) {
-            throw new RuntimeException("Failed to write LSF wrapper script " + wrapperScript, e);
-        }
-
-        // bsub -K blocks until the job exits.
-        String fullBsub = "bsub -K " + bsubOpts
-                + " -o " + stdoutLog
-                + " -e " + stderrLog
-                + " /bin/bash " + wrapperScript;
-        System.out.println("** Submitting LSF route job (blocking until complete):");
-        System.out.println("   " + fullBsub);
-
-        ProcessBuilder pb = new ProcessBuilder("sh", "-c", fullBsub);
-        pb.inheritIO();
-        try {
-            Process p = pb.start();
-            int exit = p.waitFor();
-            if (exit != 0) {
-                throw new RuntimeException("bsub exited with status " + exit
-                        + "; see " + stdoutLog + " and " + stderrLog + " for details");
-            }
-            if (!java.nio.file.Files.exists(outputDcp)) {
-                throw new RuntimeException("LSF job reported success but " + outputDcp
-                        + " was not produced; see " + stdoutLog + " and " + stderrLog);
-            }
-            System.out.println("** LSF route done: " + outputDcp);
-        } catch (java.io.IOException | InterruptedException e) {
-            throw new RuntimeException("Failed to run LSF route via bsub: " + e.getMessage(), e);
-        }
     }
 
     /**
@@ -741,79 +488,6 @@ public class RapidSA {
         System.out.println("** Inserted top-level BUFGCE 'bufg' at BUFGCE_X2Y0 (clk_in -> BUFG.I, BUFG.O -> clk fanout, CE -> VCC)");
     }
 
-    /**
-     * Routes the named clock net using the symmetric Versal clock router if it
-     * does not already have PIPs. Required after PartialRouter when the clock
-     * source is a freshly-inserted BUFGCE that PartialRouter did not know to
-     * route, otherwise HoldFixer cannot find a VROUTE root for the clock tree.
-     */
-    static void routeClockNetIfUnrouted(Design design, String clkName) {
-        Net clk = design.getNet(clkName);
-        if (clk == null) {
-            System.out.println("** routeClockNetIfUnrouted: no physical net named '" + clkName + "', skipping");
-            return;
-        }
-        if (clk.hasPIPs()) {
-            System.out.println("** routeClockNetIfUnrouted: '" + clkName + "' already has " + clk.getPIPs().size() + " PIPs, skipping");
-            return;
-        }
-        if (clk.getSource() == null) {
-            throw new RuntimeException("Cannot route clock '" + clkName + "': net has no source SitePinInst");
-        }
-        System.out.println("** routeClockNetIfUnrouted: routing '" + clkName + "' (" + clk.getPins().size() + " pins) with symmetricClkRouting");
-        GlobalSignalRouting.symmetricClkRouting(
-                clk,
-                design.getDevice(),
-                node -> NodeStatus.AVAILABLE,
-                new HashMap<>());
-        System.out.println("** routeClockNetIfUnrouted: '" + clkName + "' now has " + clk.getPIPs().size() + " PIPs");
-    }
-
-    /**
-     * Reparents SitePinInsts on per-cell orphan static-tie Nets onto the
-     * design's actual VCC/GND, drops the empty orphans, and prints how many
-     * pins were moved at the supplied stage label.
-     */
-    private static void mergeAndReportOrphans(Design design, String stageLabel) {
-        int moved = com.xilinx.rapidwright.design.tools.PBlockStaticNetFixer
-                .mergeOrphanStaticTieNetsIntoGlobals(design);
-        if (moved > 0) {
-            System.out.println("[merge-orphan-static-tie] " + stageLabel
-                    + ": reparented " + moved + " sink pin(s) onto VCC/GND");
-        }
-    }
-
-    /**
-     * Counts physical-only Nets (no EDIF logical net) whose simple-tail name
-     * matches Vivado's per-cell static-tie naming convention
-     * ({@code VCC(_N)?} / {@code GND(_N)?}). These are the orphans that show
-     * up at array RWRoute time as unrouted sinks with edifNet=NO. Prints a
-     * one-line summary tagged with the supplied stage label so multiple
-     * snapshots can be compared to bisect when the orphans appear.
-     */
-    private static void countOrphanStaticTieNets(Design design, String stageLabel) {
-        EDIFNetlist netlist = design.getNetlist();
-        Net vcc = design.getVccNet();
-        Net gnd = design.getGndNet();
-        int orphanNets = 0;
-        int orphanPins = 0;
-        String firstName = null;
-        for (Net n : design.getNets()) {
-            if (n == vcc || n == gnd) continue;
-            if (netlist.getHierNetFromName(n.getName()) != null) continue;
-            String tail = n.getName().substring(n.getName().lastIndexOf('/') + 1);
-            if (!tail.matches("VCC(_\\d+)?|GND(_\\d+)?")) continue;
-            orphanNets++;
-            for (SitePinInst spi : n.getPins()) {
-                if (!spi.isOutPin()) orphanPins++;
-            }
-            if (firstName == null) firstName = n.getName();
-        }
-        System.out.println("[orphan-static-tie] " + stageLabel + ": " + orphanNets
-                + " net(s), " + orphanPins + " sink pin(s)"
-                + (firstName != null ? "  e.g. " + firstName : ""));
-    }
-
     private static String[] createIndexedInstanceNames(String prefix, int count) {
         String[] names = new String[count];
         for (int i = 0; i < count; i++) {
@@ -845,36 +519,6 @@ public class RapidSA {
                 .sorted()
                 .map(i -> prefix + i)
                 .toArray(String[]::new);
-    }
-
-    private static void debugFindMultiSourceNets(Design design) {
-        EDIFNetlist nl = design.getNetlist();
-        EDIFCell topCell = nl.getTopCell();
-
-        // For each top-level net, simulate getNetAliases and catch the exception.
-        for (EDIFNet net : topCell.getNets()) {
-            com.xilinx.rapidwright.edif.EDIFHierNet hn =
-                    nl.getHierNetFromName(net.getName());
-            try {
-                nl.getNetAliases(hn);
-            } catch (RuntimeException e) {
-                System.err.println("getNetAliases FAILS for net '" + net.getName()
-                        + "': " + e.getMessage());
-                // Dump all port-insts on this exact net (top-level only)
-                for (EDIFPortInst p : net.getPortInsts()) {
-                    EDIFCellInst inst = p.getCellInst();
-                    String kind;
-                    if (inst == null) {
-                        kind = p.isInput() ? "TOP-INPUT" : (p.isOutput() ? "TOP-OUTPUT" : "TOP-INOUT");
-                    } else {
-                        boolean leaf = inst.getCellType().isLeafCellOrBlackBox();
-                        kind = (leaf ? "LEAF-" : "HIER-") + (p.isOutput() ? "OUT" : (p.isInput() ? "IN" : "INOUT"));
-                    }
-                    System.err.println("    " + kind + " " + (inst == null ? "<top>" : inst.getName())
-                            + "." + p.getName());
-                }
-            }
-        }
     }
 
     private static String[][] createTileInstanceNames(int nRows, int nCols) {
@@ -1203,23 +847,6 @@ public class RapidSA {
             placedBoundingBoxes.add(placedBb);
             placedBoundingBoxNames.add(instName);
 
-            // Diagnostic: print this EB's bbox and check for overlap against everything
-            // already in placedBoundingBoxes (excluding the one we just added).
-            System.out.println("[InputEB-PLACE] " + instName + " bbox: minCol=" + placedBb.getMinColumn()
-                    + " maxCol=" + placedBb.getMaxColumn()
-                    + " minRow=" + placedBb.getMinRow()
-                    + " maxRow=" + placedBb.getMaxRow());
-            for (int k = 0; k < placedBoundingBoxes.size() - 1; k++) {
-                RelocatableTileRectangle other = placedBoundingBoxes.get(k);
-                if (other.overlaps(placedBb)) {
-                    System.out.println("[InputEB-PLACE]   *** OVERLAP with '" + placedBoundingBoxNames.get(k)
-                            + "' bbox: minCol=" + other.getMinColumn()
-                            + " maxCol=" + other.getMaxColumn()
-                            + " minRow=" + other.getMinRow()
-                            + " maxRow=" + other.getMaxRow());
-                }
-            }
-
             // Add newly placed sites to occupied set for subsequent iterations
             for (SiteInst modSi : dcuModule.getSiteInsts()) {
                 Site newSite = dcuModule.getCorrespondingSite(modSi, bestAnchor);
@@ -1462,143 +1089,4 @@ public class RapidSA {
 
         System.out.println("  ** PLACED S2MM: s2mm at " + bestAnchor);
     }
-
-    /**
-     * Places the SA FSM module instance near the top-left of the design,
-     * avoiding bounding box overlap with all existing placed module instances.
-     */
-    private static void placeFSM(ArrayBuilder ab, Module fsmModule) {
-        Design arrayDesign = ab.getArray();
-        Map<Pair<Integer, Integer>, Site> centroidMap = ab.getLogicalToCentroidMap();
-
-        RelocatableTileRectangle moduleBoundingBox = fsmModule.getBoundingBox();
-
-        // Collect bounding boxes from all already-placed ModuleInsts
-        List<RelocatableTileRectangle> existingBoundingBoxes = new ArrayList<>();
-        for (ModuleInst existingMi : arrayDesign.getModuleInsts()) {
-            if (existingMi.isPlaced()) {
-                Module mod = existingMi.getModule();
-                existingBoundingBoxes.add(mod.getBoundingBox()
-                        .getCorresponding(existingMi.getPlacement().getTile(), mod.getAnchor().getTile()));
-            }
-        }
-
-        // Use the GEMM array's top-left centroid (col 0, row 0) as placement target
-        Site topLeftCentroid = centroidMap.get(new Pair<>(0, 0));
-        int targetRow = topLeftCentroid.getTile().getRow();
-        int targetCol = topLeftCentroid.getTile().getColumn();
-
-        // Build set of occupied tiles
-        Set<Tile> occupiedTiles = new HashSet<>();
-        for (SiteInst si : arrayDesign.getSiteInsts()) {
-            occupiedTiles.add(si.getTile());
-        }
-
-        // Debug: print FSM module info and valid anchors above the array
-        System.out.println("  FSM anchor site: " + fsmModule.getAnchor());
-        System.out.println("  FSM bounding box: " + moduleBoundingBox);
-        System.out.println("  FSM site types used:");
-        for (SiteInst si : fsmModule.getSiteInsts()) {
-            System.out.println("    " + si.getName() + " -> " + si.getSiteTypeEnum() + " @ " + si.getSite());
-        }
-        int arrayTopRow = targetRow;
-        System.out.println("  Total valid placements: " + fsmModule.getAllValidPlacements().size());
-        System.out.println("  Valid FSM anchors above array (row < " + arrayTopRow + "):");
-        for (Site anchor : fsmModule.getAllValidPlacements()) {
-            if (anchor.getTile().getRow() < arrayTopRow) {
-                System.out.println("    " + anchor + " (row=" + anchor.getTile().getRow() + ", col=" + anchor.getTile().getColumn() + ")");
-            }
-        }
-
-        ModuleInst mi = arrayDesign.createModuleInst("sa_fsm", fsmModule);
-
-        Site bestAnchor = null;
-        int bestDist = Integer.MAX_VALUE;
-
-        for (Site anchor : fsmModule.getAllValidPlacements()) {
-            RelocatableTileRectangle candidateBB = moduleBoundingBox
-                    .getCorresponding(anchor.getTile(), fsmModule.getAnchor().getTile());
-
-            // Check bounding box overlap with existing ModuleInsts
-            boolean overlaps = false;
-            for (RelocatableTileRectangle existing : existingBoundingBoxes) {
-                if (existing.overlaps(candidateBB)) {
-                    overlaps = true;
-                    break;
-                }
-            }
-            if (overlaps) continue;
-
-            // Check site-level conflicts with occupied tiles (e.g. GEMM tiles)
-            boolean siteConflict = false;
-            for (SiteInst modSi : fsmModule.getSiteInsts()) {
-                Site newSite = fsmModule.getCorrespondingSite(modSi, anchor);
-                if (newSite != null && occupiedTiles.contains(newSite.getTile())) {
-                    siteConflict = true;
-                    break;
-                }
-            }
-            if (siteConflict) continue;
-
-            int dist = Math.abs(anchor.getTile().getColumn() - targetCol)
-                     + Math.abs(anchor.getTile().getRow() - targetRow);
-            if (dist < bestDist) {
-                bestDist = dist;
-                bestAnchor = anchor;
-            }
-        }
-
-        if (bestAnchor == null) {
-            throw new RuntimeException("Could not find valid placement for sa_fsm");
-        }
-
-        if (!mi.place(bestAnchor, false, false)) {
-            throw new RuntimeException("Failed to place sa_fsm at " + bestAnchor);
-        }
-
-        System.out.println("  ** PLACED FSM: sa_fsm at " + bestAnchor);
-    }
-
-    /**
-     * Replaces a black-box cell in the design with the full synthesized netlist
-     * from the component's synth.dcp.
-     *
-     * @param design        The design containing black-box instances to fill
-     * @param precompileDir Directory containing precompiled component DCPs
-     * @param component     The RapidComponent whose synth.dcp to load
-     * @param sampleInstName Name of one instance using the black-box cell (used to find the cell type)
-     */
-    private static void fillBlackBox(Design design, String precompileDir,
-                                     RapidComponent component, String sampleInstName) {
-        String dcpPath = precompileDir + File.separator
-                + component.getComponentName() + File.separator + "synth.dcp";
-        Design synthDesign = Design.readCheckpoint(dcpPath);
-        EDIFTools.removeVivadoBusPreventionAnnotations(synthDesign.getNetlist());
-
-        EDIFNetlist netlist = design.getNetlist();
-        EDIFCell topCell = netlist.getTopCell();
-
-        // Find the black-box cell via a known instance
-        EDIFCellInst sampleInst = topCell.getCellInst(sampleInstName);
-        EDIFCell blackBoxCell = sampleInst.getCellType();
-
-        // Rename the black box to avoid name collision during migration
-        blackBoxCell.rename(blackBoxCell.getName() + EDIFTools.getUniqueSuffix());
-
-        // Migrate the full synthesized cell and its sub-cells
-        EDIFCell synthCell = synthDesign.getTopEDIFCell();
-        netlist.migrateCellAndSubCells(synthCell, true);
-
-        // Update all instances using the old black-box cell to the real cell
-        for (EDIFCellInst inst : topCell.getCellInsts()) {
-            if (inst.getCellType() == blackBoxCell) {
-                inst.setCellType(synthCell);
-                inst.removeBlackBoxProperty();
-            }
-        }
-
-        // Remove the old black-box cell
-        blackBoxCell.getLibrary().removeCell(blackBoxCell);
-    }
-
 }

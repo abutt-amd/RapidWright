@@ -672,14 +672,6 @@ public class FlopTreeTools {
             int dstChainDepth = Math.max(0, extra - srcChainConsumed);
             int treeDepth = Math.min(newDepth, maxDepthPerSLR);
 
-            System.out.println("[FLOP-TREE] net=" + netName
-                    + " destSLR=" + slr.getId()
-                    + " slrDist=" + slrDistFromSource
-                    + " srcChainConsumed=" + srcChainConsumed
-                    + " dstChain=" + dstChainDepth
-                    + " treeDepth=" + treeDepth
-                    + " (extra=" + extra + ")");
-
             Net slrCrossedNet = tapsBySLRId.get(slr.getId());
             if (slrCrossedNet == null) {
                 throw new RuntimeException("No tap net found for SLR " + slr.getId()
