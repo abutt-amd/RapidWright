@@ -25,15 +25,12 @@ package com.xilinx.rapidwright.rapidsa;
 
 import com.xilinx.rapidwright.design.Cell;
 import com.xilinx.rapidwright.design.Design;
-import com.xilinx.rapidwright.design.DesignTools;
 import com.xilinx.rapidwright.design.Module;
 import com.xilinx.rapidwright.design.ModuleInst;
 import com.xilinx.rapidwright.design.Net;
-import com.xilinx.rapidwright.design.NetType;
 import com.xilinx.rapidwright.design.RelocatableTileRectangle;
 import com.xilinx.rapidwright.design.SiteInst;
 import com.xilinx.rapidwright.design.SitePinInst;
-import com.xilinx.rapidwright.design.Unisim;
 import com.xilinx.rapidwright.design.tools.ArrayBuilder;
 import com.xilinx.rapidwright.design.tools.ArrayBuilderConfig;
 import com.xilinx.rapidwright.design.tools.FlopTreeTools;
@@ -58,9 +55,8 @@ import com.xilinx.rapidwright.rapidsa.components.MM2SNOCChannel;
 import com.xilinx.rapidwright.rapidsa.components.RapidComponent;
 import com.xilinx.rapidwright.rapidsa.components.S2MMNOCChannel;
 import com.xilinx.rapidwright.rwroute.GlobalSignalRouting;
-import com.xilinx.rapidwright.rwroute.HoldFixer;
 import com.xilinx.rapidwright.rwroute.NodeStatus;
-import com.xilinx.rapidwright.rwroute.PartialRouter;
+import com.xilinx.rapidwright.rwroute.PartialCUFR;
 import com.xilinx.rapidwright.util.Pair;
 import com.xilinx.rapidwright.util.VivadoTools;
 import joptsimple.OptionParser;
@@ -130,8 +126,8 @@ public class RapidSA {
 
         Design sa = RapidSANetlistBuilder.createSystolicArrayNetlist(nRows, nCols, partName, "RapidSA");
 
-        sa.getNetlist().exportEDIF("test.edf");
-        sa.writeCheckpoint("blackbox_netlist.dcp");
+//        sa.getNetlist().exportEDIF("test.edf");
+//        sa.writeCheckpoint("blackbox_netlist.dcp");
 
         GEMMTile tile = new GEMMTile(4, 4);
 
@@ -276,8 +272,8 @@ public class RapidSA {
         // are placed by createArray, but MM2S/S2MM/secondary MM2S have just been
         // added as wired black boxes and aren't yet placed). Useful for inspecting
         // the netlist topology before peripheral placement / flatten / flop-tree.
-        arrayDesign.writeCheckpoint("wired_blackbox_netlist.dcp");
-        System.out.println("** Wrote wired_blackbox_netlist.dcp (post-attach, pre-placement)");
+//        arrayDesign.writeCheckpoint("wired_blackbox_netlist.dcp");
+//        System.out.println("** Wrote wired_blackbox_netlist.dcp (post-attach, pre-placement)");
 
         // Look up the SLR each input EB root landed in, so we can place the
         // secondary MM2S(es) in the same SLR as the EB they drive.
@@ -451,59 +447,18 @@ public class RapidSA {
 
         arrayDesign.setDesignOutOfContext(true);
         String baseDcpName = "systolic_array_" + nRows + "x" + nCols;
-        arrayDesign.writeCheckpoint(baseDcpName + ".dcp");
-
-        // [diag] static-net pin/PIP counts immediately before routing, so we
-        // can attribute the unrouted-pin growth to RapidSA additions vs.
-        // RWRoute-internal pin materialization (createPossiblePinsToStaticNets).
-        System.out.println("[diag] pre-route array GND pins=" + arrayDesign.getGndNet().getPins().size()
-                + " PIPs=" + arrayDesign.getGndNet().getPIPs().size());
-        System.out.println("[diag] pre-route array VCC pins=" + arrayDesign.getVccNet().getPins().size()
-                + " PIPs=" + arrayDesign.getVccNet().getPIPs().size());
-
-        // [diag] dump unrouted static-net pins (one file per static net) as
-        // logical pin names so we can compare against Vivado's view of the
-        // same design without paying the cost of get_pips/get_nodes traversal.
-        DesignTools.updatePinsIsRouted(arrayDesign);
-        for (Net staticNet : new Net[] { arrayDesign.getGndNet(), arrayDesign.getVccNet() }) {
-            if (staticNet == null) continue;
-            String fileName = "unrouted_" + staticNet.getName().replace('<', '_').replace('>', '_') + ".txt";
-            int unrouted = 0;
-            try (java.io.PrintWriter pw = new java.io.PrintWriter(fileName)) {
-                for (SitePinInst spi : staticNet.getPins()) {
-                    if (spi.isOutPin() || spi.isRouted()) continue;
-                    boolean wroteAny = false;
-                    SiteInst si = spi.getSiteInst();
-                    for (com.xilinx.rapidwright.device.BELPin belPin : DesignTools.getConnectedBELPins(spi)) {
-                        Cell cell = si.getCell(belPin.getBEL());
-                        if (cell == null) continue;
-                        String logical = cell.getLogicalPinMapping(belPin.getName());
-                        if (logical == null) continue;
-                        pw.println(cell.getName() + "/" + logical);
-                        wroteAny = true;
-                    }
-                    if (!wroteAny) {
-                        // Fall back to the physical pin if no logical mapping exists
-                        // (e.g. dedicated tie-offs with no leaf-cell connection).
-                        pw.println(spi);
-                    }
-                    unrouted++;
-                }
-            } catch (java.io.IOException e) {
-                throw new RuntimeException("Failed to write " + fileName, e);
-            }
-            System.out.println("[diag] wrote " + unrouted + " unrouted " + staticNet.getName() + " pins to " + fileName);
-        }
+//        arrayDesign.writeCheckpoint(baseDcpName + ".dcp");
 
         if (options.has("route")) {
+            arrayDesign.getNetlist().expandMacroUnisims();
             System.out.println("** Running RWRoute partial route + HoldFixer on " + baseDcpName + ".dcp (softPreserve=true)");
-            PartialRouter.routeDesignWithUserDefinedArguments(arrayDesign,
+            PartialCUFR.routeDesignWithUserDefinedArguments(arrayDesign,
                     new String[]{
                             "--useUTurnNodes",
                             "--nonTimingDriven",
                     },
                     /*pinsToRoute=*/ null,
-                    /*softPreserve=*/ true);
+                    /*softPreserve=*/ false);
             // RWRoute's createPossiblePinsToStaticNets may have re-attached
             // SitePinInsts to per-cell orphan static-tie nets — reparent them
             // onto the design's actual VCC/GND so report_route_status sees
@@ -513,60 +468,60 @@ public class RapidSA {
             // HoldFixer holdFixer = new HoldFixer(arrayDesign, "clk");
             // holdFixer.fixHoldViolations();
 
-            DesignTools.updatePinsIsRouted(arrayDesign);
-            com.xilinx.rapidwright.util.ReportRouteStatusResult rrs =
-                    com.xilinx.rapidwright.util.ReportRouteStatus.reportRouteStatus(arrayDesign);
-            System.out.println(rrs.toString("RapidWright Route Status (post-RWRoute)"));
-            if (!rrs.isFullyRouted()) {
-                System.out.println("** WARNING: design is NOT fully routed (unroutedNets="
-                        + rrs.unroutedNets + ", routingErrors=" + rrs.netsWithRoutingErrors
-                        + ", someUnroutedPins=" + rrs.netsWithSomeUnroutedPins
-                        + ", resourceConflicts=" + rrs.netsWithResourceConflicts + ")");
-
-                // Dump every net with unrouted sinks, sorted by net name. One
-                // line per net + connectedNode for each missing sink. Helps
-                // distinguish "all DSP58 internal tie-downs" vs "macro pin
-                // mapping mismatches" vs "real signal-net failures".
-                String dumpFile = baseDcpName + "_unrouted_nets.txt";
-                int netsWithUnrouted = 0;
-                int totalUnroutedPins = 0;
-                java.util.Map<String, Integer> reasonHistogram = new java.util.TreeMap<>();
-                // Skip clock and reset nets — clock is handled by the clock
-                // router; reset is intentionally left dangling for AVED to
-                // drive at integration time.
-                java.util.Set<String> skipNetNames = new java.util.HashSet<>(
-                        java.util.Arrays.asList("clk", "clk_in", "rst_n", "rst", "reset", "reset_n"));
-                try (java.io.PrintWriter pw = new java.io.PrintWriter(dumpFile)) {
-                    java.util.List<Net> sorted = new java.util.ArrayList<>(arrayDesign.getNets());
-                    sorted.sort(java.util.Comparator.comparing(Net::getName));
-                    for (Net n : sorted) {
-                        if (com.xilinx.rapidwright.design.NetTools.isGlobalClock(n)) continue;
-                        if (skipNetNames.contains(n.getName())) continue;
-                        java.util.List<SitePinInst> bad = new java.util.ArrayList<>();
-                        for (SitePinInst spi : n.getPins()) {
-                            if (!spi.isOutPin() && !spi.isRouted()) bad.add(spi);
-                        }
-                        if (bad.isEmpty()) continue;
-                        netsWithUnrouted++;
-                        totalUnroutedPins += bad.size();
-                        boolean hasLogical = arrayDesign.getNetlist()
-                                .getHierNetFromName(n.getName()) != null;
-                        pw.println(n.getName() + "  (" + bad.size() + " unrouted sinks, edifNet="
-                                + (hasLogical ? "yes" : "NO") + ")");
-                        for (SitePinInst spi : bad) {
-                            String node = String.valueOf(spi.getConnectedNode());
-                            pw.println("    " + spi + "  connectedNode=" + node);
-                            String key = n.isStaticNet() ? "static" : "signal";
-                            reasonHistogram.merge(key, 1, Integer::sum);
-                        }
-                    }
-                } catch (java.io.IOException e) {
-                    throw new RuntimeException("Failed to write " + dumpFile, e);
-                }
-                System.out.println("** Dumped " + totalUnroutedPins + " unrouted sinks across "
-                        + netsWithUnrouted + " nets to " + dumpFile);
-                System.out.println("** Unrouted sink breakdown: " + reasonHistogram);
-            }
+//            DesignTools.updatePinsIsRouted(arrayDesign);
+//            com.xilinx.rapidwright.util.ReportRouteStatusResult rrs =
+//                    com.xilinx.rapidwright.util.ReportRouteStatus.reportRouteStatus(arrayDesign);
+//            System.out.println(rrs.toString("RapidWright Route Status (post-RWRoute)"));
+//            if (!rrs.isFullyRouted()) {
+//                System.out.println("** WARNING: design is NOT fully routed (unroutedNets="
+//                        + rrs.unroutedNets + ", routingErrors=" + rrs.netsWithRoutingErrors
+//                        + ", someUnroutedPins=" + rrs.netsWithSomeUnroutedPins
+//                        + ", resourceConflicts=" + rrs.netsWithResourceConflicts + ")");
+//
+//                // Dump every net with unrouted sinks, sorted by net name. One
+//                // line per net + connectedNode for each missing sink. Helps
+//                // distinguish "all DSP58 internal tie-downs" vs "macro pin
+//                // mapping mismatches" vs "real signal-net failures".
+//                String dumpFile = baseDcpName + "_unrouted_nets.txt";
+//                int netsWithUnrouted = 0;
+//                int totalUnroutedPins = 0;
+//                java.util.Map<String, Integer> reasonHistogram = new java.util.TreeMap<>();
+//                // Skip clock and reset nets — clock is handled by the clock
+//                // router; reset is intentionally left dangling for AVED to
+//                // drive at integration time.
+//                java.util.Set<String> skipNetNames = new java.util.HashSet<>(
+//                        java.util.Arrays.asList("clk", "clk_in", "rst_n", "rst", "reset", "reset_n"));
+//                try (java.io.PrintWriter pw = new java.io.PrintWriter(dumpFile)) {
+//                    java.util.List<Net> sorted = new java.util.ArrayList<>(arrayDesign.getNets());
+//                    sorted.sort(java.util.Comparator.comparing(Net::getName));
+//                    for (Net n : sorted) {
+//                        if (com.xilinx.rapidwright.design.NetTools.isGlobalClock(n)) continue;
+//                        if (skipNetNames.contains(n.getName())) continue;
+//                        java.util.List<SitePinInst> bad = new java.util.ArrayList<>();
+//                        for (SitePinInst spi : n.getPins()) {
+//                            if (!spi.isOutPin() && !spi.isRouted()) bad.add(spi);
+//                        }
+//                        if (bad.isEmpty()) continue;
+//                        netsWithUnrouted++;
+//                        totalUnroutedPins += bad.size();
+//                        boolean hasLogical = arrayDesign.getNetlist()
+//                                .getHierNetFromName(n.getName()) != null;
+//                        pw.println(n.getName() + "  (" + bad.size() + " unrouted sinks, edifNet="
+//                                + (hasLogical ? "yes" : "NO") + ")");
+//                        for (SitePinInst spi : bad) {
+//                            String node = String.valueOf(spi.getConnectedNode());
+//                            pw.println("    " + spi + "  connectedNode=" + node);
+//                            String key = n.isStaticNet() ? "static" : "signal";
+//                            reasonHistogram.merge(key, 1, Integer::sum);
+//                        }
+//                    }
+//                } catch (java.io.IOException e) {
+//                    throw new RuntimeException("Failed to write " + dumpFile, e);
+//                }
+//                System.out.println("** Dumped " + totalUnroutedPins + " unrouted sinks across "
+//                        + netsWithUnrouted + " nets to " + dumpFile);
+//                System.out.println("** Unrouted sink breakdown: " + reasonHistogram);
+//            }
 
             arrayDesign.writeCheckpoint(baseDcpName + "_routed.dcp");
             System.out.println("** Wrote " + baseDcpName + "_routed.dcp");
@@ -579,7 +534,7 @@ public class RapidSA {
             Path tclLog = workdir.resolve(baseDcpName + "_vivado_route.log");
             StringBuilder tcl = new StringBuilder()
                     .append("open_checkpoint {").append(inputDcp).append("}; ")
-                    .append("route_design; ")
+                    .append("route_design -preserve -no_psir; ")
                     .append("write_checkpoint -force {").append(outputDcp).append("}; ")
                     .append("report_route_status; ");
             if (options.has("report-timing")) {
@@ -944,52 +899,6 @@ public class RapidSA {
         Design pnrDesign = Design.readCheckpoint(dcpPath);
         EDIFTools.removeVivadoBusPreventionAnnotations(pnrDesign.getNetlist());
 
-        // [diag] precompile snapshot — count GND SitePinInsts on SLICEM SiteInsts
-        // and on the GND net total. Distinguishes Case A (PIPs/pins were in the
-        // precompile and got lost in relocation) from Case B (pins materialized
-        // by createPossiblePinsToStaticNets at array RWRoute time).
-        {
-            Net pcGnd = pnrDesign.getGndNet();
-            int totalGndSinks = 0;
-            int slicemGndSinks = 0;
-            int slicemGndSitesWithPins = 0;
-            java.util.Set<SiteInst> slicemSeen = new java.util.HashSet<>();
-            if (pcGnd != null) {
-                for (SitePinInst spi : pcGnd.getPins()) {
-                    if (spi.isOutPin()) continue;
-                    totalGndSinks++;
-                    SiteInst si = spi.getSiteInst();
-                    if (si == null || si.getSite() == null) continue;
-                    if (si.getSiteTypeEnum() != null
-                            && si.getSiteTypeEnum().name().startsWith("SLICEM")) {
-                        slicemGndSinks++;
-                        if (slicemSeen.add(si)) slicemGndSitesWithPins++;
-                    }
-                }
-            }
-            int gndPips = (pcGnd != null) ? pcGnd.getPIPs().size() : 0;
-            System.out.println("[precompile-gnd] " + component.getComponentName()
-                    + ": GND total sink pins=" + totalGndSinks
-                    + ", on SLICEMs=" + slicemGndSinks
-                    + " (across " + slicemGndSitesWithPins + " SLICEMs)"
-                    + ", PIPs=" + gndPips);
-            // For drain specifically, dump the first SLICEM with GND pins so we
-            // can see whether F_I/G_I/H_I/A5..H5/EX..HX-style pins were already
-            // present (Case A) or absent (Case B).
-            if (component.getComponentName().contains("Drain")) {
-                SiteInst sample = null;
-                for (SiteInst si : slicemSeen) { sample = si; break; }
-                if (sample != null) {
-                    System.out.println("[precompile-gnd] sample SLICEM " + sample.getSiteName() + " GND pins:");
-                    for (SitePinInst spi : pcGnd.getPins()) {
-                        if (spi.getSiteInst() == sample && !spi.isOutPin()) {
-                            System.out.println("    " + spi + " connectedNode=" + spi.getConnectedNode());
-                        }
-                    }
-                }
-            }
-        }
-
         ArrayBuilder.removeBUFGs(pnrDesign);
         Net clkNet = pnrDesign.getNet(component.getClkName());
         if (clkNet != null) {
@@ -1025,19 +934,6 @@ public class RapidSA {
                 + allLockedCount + " all-<LOCKED> SiteInsts (total SiteInsts before removal: "
                 + (pnrDesign.getSiteInsts().size() + toRemove.size()) + ")");
 
-        // Refresh isRouted from current PIP topology and report route status
-        // on the loaded precompile DCP, so we can spot any per-component
-        // routing gaps before Module relocation hides them.
-        DesignTools.updatePinsIsRouted(pnrDesign);
-        com.xilinx.rapidwright.util.ReportRouteStatusResult rrs =
-                com.xilinx.rapidwright.util.ReportRouteStatus.reportRouteStatus(pnrDesign);
-        System.out.println(rrs.toString("Route Status: loadRelocatableModule[" + component.getComponentName() + "]"));
-
-        // Pass unrouteStaticNets=false so the precompile's GND/VCC PIPs
-        // survive into the Module template and relocate into the array's
-        // global static nets along with the rest of the routing. The
-        // single-arg ctor defaults to true, which silently dropped these PIPs
-        // and left ~tens of GND sinks unrouted in the array.
         Module module = new Module(pnrDesign, false);
         module.calculateAllValidPlacements(targetDesign.getDevice());
         return module;

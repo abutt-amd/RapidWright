@@ -29,8 +29,8 @@ import com.xilinx.rapidwright.design.RelocatableTileRectangle;
 import com.xilinx.rapidwright.design.SiteInst;
 import com.xilinx.rapidwright.design.Unisim;
 import com.xilinx.rapidwright.device.BEL;
-import com.xilinx.rapidwright.device.Series;
 import com.xilinx.rapidwright.device.SLR;
+import com.xilinx.rapidwright.device.Series;
 import com.xilinx.rapidwright.device.Site;
 import com.xilinx.rapidwright.device.SiteTypeEnum;
 import com.xilinx.rapidwright.device.Tile;
@@ -55,7 +55,6 @@ import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
-import java.util.stream.Collectors;
 
 public class FlopTreeTools {
 
@@ -185,7 +184,7 @@ public class FlopTreeTools {
                     quadrants.bottomLeft.add(portInst);
                 } else if (portColumn > tileColumn && portRow <= tileRow) {
                     quadrants.topRight.add(portInst);
-                } else if (portRow > tileRow) {
+                } else {
                     quadrants.bottomRight.add(portInst);
                 }
             }
@@ -199,12 +198,13 @@ public class FlopTreeTools {
         Map<SLR, List<EDIFHierPortInst>> portInstMap = new HashMap<>();
 
         for (EDIFHierPortInst portInst : portInsts) {
-            Cell cell = design.getCell(portInst.getFullHierarchicalInstName());
-            if (cell != null && cell.isPlaced()) {
-                Tile t = cell.getTile();
-                SLR slr = t.getSLR();
-                portInstMap.computeIfAbsent(slr, k -> new ArrayList<>()).add(portInst);
+            Cell cell = portInst.getPhysicalCell(design);
+            if (cell == null || !cell.isPlaced()) {
+                throw new RuntimeException("Port inst: " + portInst + " is not placed");
             }
+            Tile t = cell.getTile();
+            SLR slr = t.getSLR();
+            portInstMap.computeIfAbsent(slr, k -> new ArrayList<>()).add(portInst);
         }
 
         return portInstMap;
