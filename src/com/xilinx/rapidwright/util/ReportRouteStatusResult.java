@@ -22,6 +22,9 @@
 
 package com.xilinx.rapidwright.util;
 
+import com.xilinx.rapidwright.design.Net;
+
+import java.util.ArrayList;
 import java.util.List;
 
 public class ReportRouteStatusResult {
@@ -42,6 +45,24 @@ public class ReportRouteStatusResult {
     public int netsWithSomeUnplacedPins;
     public int netsWithSomeUnroutedPins;
     public int netsWithResourceConflicts;
+
+    /**
+     * Nets counted by {@link #netsWithSomeUnroutedPins}. Populated only when
+     * the result is produced by
+     * {@link ReportRouteStatus#reportRouteStatus(com.xilinx.rapidwright.design.Design)};
+     * empty when the result is parsed from a Vivado log.
+     */
+    public final List<Net> netsWithSomeUnroutedPinsList = new ArrayList<>();
+    /**
+     * Nets counted by {@link #unroutedNets}. See
+     * {@link #netsWithSomeUnroutedPinsList} for population caveats.
+     */
+    public final List<Net> unroutedNetsList = new ArrayList<>();
+    /**
+     * Nets counted by {@link #netsWithResourceConflicts}. See
+     * {@link #netsWithSomeUnroutedPinsList} for population caveats.
+     */
+    public final List<Net> netsWithResourceConflictsList = new ArrayList<>();
 
     private static int parseLog(List<String> log, String key) {
         List<String> matchingLines = VivadoTools.searchVivadoLog(log, key);

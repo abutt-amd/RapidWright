@@ -98,13 +98,16 @@ public class ReportRouteStatus {
             } else if (!isFullyRouted) {
                 if (isPartiallyRouted) {
                     rrs.netsWithSomeUnroutedPins++;
+                    rrs.netsWithSomeUnroutedPinsList.add(net);
                 } else {
                     rrs.unroutedNets++;
+                    rrs.unroutedNetsList.add(net);
                 }
             }
         }
 
         rrs.netsWithResourceConflicts = conflictingNets.size();
+        rrs.netsWithResourceConflictsList.addAll(conflictingNets);
         rrs.netsWithRoutingErrors = rrs.netsWithSomeUnroutedPins + rrs.netsWithResourceConflicts;
         rrs.fullyRoutedNets = rrs.routableNets - rrs.unroutedNets - rrs.netsWithRoutingErrors;
         return rrs;

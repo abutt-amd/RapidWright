@@ -252,85 +252,88 @@ public class ArrayNetlistGraph {
             candidateMap.put(node, 1);
         }
 
-        NetlistEdge extraConstraintEdge = graph.outgoingEdgesOf(topLeftNode).iterator().next();
-        if (extraConstraintEdge.isRight() || extraConstraintEdge.isBelow()) {
-            // Add additional constraint based on the sideMap
-            String extraConstraintNode = graph.getEdgeTarget(extraConstraintEdge);
-            candidateMap.remove(extraConstraintNode);
-            Pair<Integer, Integer> extraConstraintPlacement;
-            if (extraConstraintEdge.isRight()) {
-                extraConstraintPlacement = new Pair<>(1, 0);
-            } else {
-                extraConstraintPlacement = new Pair<>(0, 1);
-            }
-            idealPlacement.place(extraConstraintNode, extraConstraintPlacement);
-            for (NetlistEdge edge : graph.outgoingEdgesOf(extraConstraintNode)) {
-                String targetNode = graph.getEdgeTarget(edge);
-                int count = candidateMap.computeIfAbsent(targetNode, (n) -> 0);
-                candidateMap.put(targetNode, count + 1);
-            }
-        }
-        while (!candidateMap.isEmpty()) {
-            List<String> sortedCandidates = candidateMap.entrySet().stream()
-                    .sorted((e1, e2) -> {
-                      if (e1.getValue() == e2.getValue()) {
-                          // Tie-break of shorted path distance
-                          GraphPath<String, NetlistEdge> shortestPathE1 = dsp.getPath(topLeftNode, e1.getKey());
-                          GraphPath<String, NetlistEdge> shortestPathE2 = dsp.getPath(topLeftNode, e2.getKey());
-                          return shortestPathE1.getLength() - shortestPathE2.getLength();
-                      }
-                      return e2.getValue().compareTo(e1.getValue());
-                    })
-                    .map(Map.Entry::getKey).collect(Collectors.toList());
-            String node = sortedCandidates.get(0);
-            candidateMap.remove(node);
-            for (NetlistEdge edge : graph.outgoingEdgesOf(node)) {
-                String targetNode = graph.getEdgeTarget(edge);
-                int count = candidateMap.computeIfAbsent(targetNode, (n) -> 0);
-                candidateMap.put(targetNode, count + 1);
-            }
-            Set<NetlistEdge> inEdges = graph.incomingEdgesOf(node);
-            List<String> inNeighbors = new ArrayList<>();
-            for (NetlistEdge e : inEdges) {
-                inNeighbors.add(graph.getEdgeSource(e));
-            }
-            if (inNeighbors.size() > 3) {
-                throw new RuntimeException("Greedy placement does not work for given netlist");
-            }
-            List<Pair<Integer, Integer>> inNeighborPlacements = new ArrayList<>();
-            for (String inNeighbor : inNeighbors) {
-                inNeighborPlacements.add(idealPlacement.getPlacement(inNeighbor));
-            }
-            inNeighborPlacements = inNeighborPlacements.stream().sorted(
-                    (p1, p2) -> {
-                        if (p1.getSecond().equals(p2.getSecond())) {
-                            return p1.getFirst() - p2.getFirst();
-                        }
-                        return p1.getSecond() - p2.getSecond();
-                    }).collect(Collectors.toList());
-            List<Pair<Integer, Integer>> validPlacements = new ArrayList<>();
-            if (inNeighbors.size() == 1) {
-                Pair<Integer, Integer> neighborPlacement = inNeighborPlacements.get(0);
-                validPlacements.add(new Pair<>(neighborPlacement.getFirst() + 1, neighborPlacement.getSecond()));
-                validPlacements.add(new Pair<>(neighborPlacement.getFirst(), neighborPlacement.getSecond() + 1));
-            } else if (inNeighbors.size() == 2) {
-                int x = inNeighborPlacements.get(0).getFirst();
-                int y = inNeighborPlacements.get(1).getSecond();
-                validPlacements.add(new Pair<>(x, y));
-            } else {
-                throw new RuntimeException("Not yet implemented, try using OR-tools based placement");
-            }
-            Pair<Integer, Integer> placement = null;
-            for (Pair<Integer, Integer> location : validPlacements) {
-                if (!idealPlacement.placementExistsAtLocation(location)) {
-                    placement = location;
+        if (!graph.outgoingEdgesOf(topLeftNode).isEmpty()) {
+            NetlistEdge extraConstraintEdge = graph.outgoingEdgesOf(topLeftNode).iterator().next();
+            if (extraConstraintEdge.isRight() || extraConstraintEdge.isBelow()) {
+                // Add additional constraint based on the sideMap
+                String extraConstraintNode = graph.getEdgeTarget(extraConstraintEdge);
+                candidateMap.remove(extraConstraintNode);
+                Pair<Integer, Integer> extraConstraintPlacement;
+                if (extraConstraintEdge.isRight()) {
+                    extraConstraintPlacement = new Pair<>(1, 0);
+                } else {
+                    extraConstraintPlacement = new Pair<>(0, 1);
+                }
+                idealPlacement.place(extraConstraintNode, extraConstraintPlacement);
+                for (NetlistEdge edge : graph.outgoingEdgesOf(extraConstraintNode)) {
+                    String targetNode = graph.getEdgeTarget(edge);
+                    int count = candidateMap.computeIfAbsent(targetNode, (n) -> 0);
+                    candidateMap.put(targetNode, count + 1);
                 }
             }
-            if (placement == null) {
-                throw new RuntimeException("Could not find valid greedy placement for cell: " + node);
+            while (!candidateMap.isEmpty()) {
+                List<String> sortedCandidates = candidateMap.entrySet().stream()
+                        .sorted((e1, e2) -> {
+                          if (e1.getValue() == e2.getValue()) {
+                              // Tie-break of shorted path distance
+                              GraphPath<String, NetlistEdge> shortestPathE1 = dsp.getPath(topLeftNode, e1.getKey());
+                              GraphPath<String, NetlistEdge> shortestPathE2 = dsp.getPath(topLeftNode, e2.getKey());
+                              return shortestPathE1.getLength() - shortestPathE2.getLength();
+                          }
+                          return e2.getValue().compareTo(e1.getValue());
+                        })
+                        .map(Map.Entry::getKey).collect(Collectors.toList());
+                String node = sortedCandidates.get(0);
+                candidateMap.remove(node);
+                for (NetlistEdge edge : graph.outgoingEdgesOf(node)) {
+                    String targetNode = graph.getEdgeTarget(edge);
+                    int count = candidateMap.computeIfAbsent(targetNode, (n) -> 0);
+                    candidateMap.put(targetNode, count + 1);
+                }
+                Set<NetlistEdge> inEdges = graph.incomingEdgesOf(node);
+                List<String> inNeighbors = new ArrayList<>();
+                for (NetlistEdge e : inEdges) {
+                    inNeighbors.add(graph.getEdgeSource(e));
+                }
+                if (inNeighbors.size() > 3) {
+                    throw new RuntimeException("Greedy placement does not work for given netlist");
+                }
+                List<Pair<Integer, Integer>> inNeighborPlacements = new ArrayList<>();
+                for (String inNeighbor : inNeighbors) {
+                    inNeighborPlacements.add(idealPlacement.getPlacement(inNeighbor));
+                }
+                inNeighborPlacements = inNeighborPlacements.stream().sorted(
+                        (p1, p2) -> {
+                            if (p1.getSecond().equals(p2.getSecond())) {
+                                return p1.getFirst() - p2.getFirst();
+                            }
+                            return p1.getSecond() - p2.getSecond();
+                        }).collect(Collectors.toList());
+                List<Pair<Integer, Integer>> validPlacements = new ArrayList<>();
+                if (inNeighbors.size() == 1) {
+                    Pair<Integer, Integer> neighborPlacement = inNeighborPlacements.get(0);
+                    validPlacements.add(new Pair<>(neighborPlacement.getFirst() + 1, neighborPlacement.getSecond()));
+                    validPlacements.add(new Pair<>(neighborPlacement.getFirst(), neighborPlacement.getSecond() + 1));
+                } else if (inNeighbors.size() == 2) {
+                    int x = inNeighborPlacements.get(0).getFirst();
+                    int y = inNeighborPlacements.get(1).getSecond();
+                    validPlacements.add(new Pair<>(x, y));
+                } else {
+                    throw new RuntimeException("Not yet implemented, try using OR-tools based placement");
+                }
+                Pair<Integer, Integer> placement = null;
+                for (Pair<Integer, Integer> location : validPlacements) {
+                    if (!idealPlacement.placementExistsAtLocation(location)) {
+                        placement = location;
+                    }
+                }
+                if (placement == null) {
+                    throw new RuntimeException("Could not find valid greedy placement for cell: " + node);
+                }
+                idealPlacement.place(node, placement);
             }
-            idealPlacement.place(node, placement);
         }
+
 
         for (int y = 0; y < graph.vertexSet().size(); y++) {
             for (int x = 0; x < graph.vertexSet().size(); x++) {

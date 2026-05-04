@@ -1045,6 +1045,23 @@ public class ECOTools {
             break;
         }
 
+        if (spi == null && LUTTools.isCellALUT(cell)) {
+            // All candidate sitePinNames were blocked (e.g. their site wires still
+            // carry a non-aliased net from a prior route). For LUT inputs we can
+            // remap the logical pin to an unused physical pin and retry; the
+            // in-loop branch above only handles the SitePinInst-occupied case,
+            // not the site-wire-occupied case.
+            String newPhysPin = LUTTools.getUnmappedPhysicalLUTInputPin(cell);
+            if (newPhysPin != null) {
+                String physicalPinName = cell.getPhysicalPinMapping(logicalPinName);
+                if (physicalPinName != null) {
+                    cell.removePinMapping(physicalPinName);
+                }
+                cell.addPinMapping(newPhysPin, logicalPinName);
+                spi = createExitSitePinInst(design, ehpi, net);
+            }
+        }
+
         if (spi == null) {
             throw new RuntimeException("ERROR: Unable to route pin '" + ehpi + "' out of site " + si.getSiteName() + ".");
         }

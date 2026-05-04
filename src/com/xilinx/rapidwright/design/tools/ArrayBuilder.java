@@ -1141,6 +1141,7 @@ public class ArrayBuilder {
 
     public void createArray() {
         placeArray();
+        countUnroutedStaticSinks(array, "after placeArray");
 
         // Unroute conflicting nets. Refuse to unroute static nets (VCC/GND):
         // doing so silently strips every per-tile static-net PIP from the
@@ -1169,26 +1170,85 @@ public class ArrayBuilder {
         if (!overlapping.isEmpty()) {
             System.out.println("Found " + overlapping.size() + " overlapping nets, that were unrouted.");
         }
+        countUnroutedStaticSinks(array, "after overlap unroute");
 
         if (config.isSkipImpl() && config.getTopDesign() == null) {
             finalizeStandaloneArray();
+            countUnroutedStaticSinks(array, "after finalizeStandaloneArray");
         }
 
         if (config.shouldUnrouteStaticNets()) {
             unrouteStaticNets(array);
+            countUnroutedStaticSinks(array, "after unrouteStaticNets");
         }
 
-        array.getNetlist().consolidateAllToWorkLibrary(false, true);
-        array.flattenDesign();
+        // [TEST] Skip consolidate+flatten to confirm they're the source of
+        // the spurious GND SitePinInsts that RWRoute.preprocess later
+        // manufactures. Restore once confirmed.
+        // array.getNetlist().consolidateAllToWorkLibrary(false, true);
+        countUnroutedStaticSinks(array, "after consolidateAllToWorkLibrary [SKIPPED]");
+        // array.flattenDesign();
+        countUnroutedStaticSinks(array, "after flattenDesign [SKIPPED]");
 //        array.getNetlist().collapseMacroUnisims(Series.Versal);
 //        array.getNetlist().exportEDIF("array.edif");
 //        System.exit(0);
 
         if (config.isOutOfContext()) {
             createFlopHarnessForArray();
+            countUnroutedStaticSinks(array, "after createFlopHarnessForArray");
         }
 
         routeArray();
+        countUnroutedStaticSinks(array, "after routeArray");
+    }
+
+    /**
+     * Diagnostic: refresh isRouted state and report the number of unrouted
+     * sink SitePinInsts on VCC and GND. Use to bracket each step of
+     * {@link #createArray()} and bisect which step is dropping static-net
+     * coverage. Also counts orphan per-cell static-tie nets
+     */
+    private static void countUnroutedStaticSinks(Design design, String stageLabel) {
+        DesignTools.updatePinsIsRouted(design);
+        int gndUnrouted = 0;
+        int vccUnrouted = 0;
+        for (Net staticNet : new Net[] { design.getGndNet(), design.getVccNet() }) {
+            if (staticNet == null) continue;
+            int unrouted = 0;
+            for (SitePinInst spi : staticNet.getPins()) {
+                if (spi.isOutPin()) continue;
+                if (!spi.isRouted()) unrouted++;
+            }
+            if (staticNet == design.getGndNet()) gndUnrouted = unrouted;
+            else vccUnrouted = unrouted;
+        }
+
+        // Orphan per-cell static-tie nets (physical-only, name tail like
+        // VCC(_N)? / GND(_N)?) appear when consolidate/flatten splits Vivado's
+        // shared static drivers into per-cell tie nets. These won't show up in
+        // the gnd/vcc unrouted count above, but they leave SitePinInsts that
+        // RWRoute will later try to route under the wrong parent.
+        int orphanNets = 0;
+        int orphanPins = 0;
+        EDIFNetlist netlist = design.getNetlist();
+        Net vcc = design.getVccNet();
+        Net gnd = design.getGndNet();
+        for (Net n : design.getNets()) {
+            if (n == vcc || n == gnd) continue;
+            if (netlist.getHierNetFromName(n.getName()) != null) continue;
+            String tail = n.getName().substring(n.getName().lastIndexOf('/') + 1);
+            if (!tail.matches("VCC(_\\d+)?|GND(_\\d+)?")) continue;
+            orphanNets++;
+            for (SitePinInst spi : n.getPins()) {
+                if (!spi.isOutPin()) orphanPins++;
+            }
+        }
+
+        System.out.println("[static-diag] " + stageLabel
+                + ": GND unrouted sinks=" + gndUnrouted
+                + ", VCC unrouted sinks=" + vccUnrouted
+                + ", orphan static-tie nets=" + orphanNets
+                + " (" + orphanPins + " sink pins)");
     }
 
     private static Map<Pair<Integer, Integer>, String> foldIdealPlacement(Map<Pair<Integer, Integer>, String> placement,
