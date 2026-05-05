@@ -597,7 +597,7 @@ public class FlopTreeTools {
     public static void insertFlopTreeForNet(Design design, String netName, String clkName, int depth,
                                             int maxDepthPerSLR) {
         EDIFNetlist netlist = design.getNetlist();
-        EDIFHierNet parentNet = netlist.getParentNet(netlist.getHierNetFromName(netName));
+        EDIFHierNet parentNet = netlist.getHierNetFromName(netName).getLeafSourcePortInst().getHierarchicalNet();
         Net topNet = design.getNet(parentNet.getHierarchicalNetName());
         List<EDIFHierPortInst> sinkHierPortInsts = topNet.getLogicalHierNet().getLeafHierPortInsts(false);
         Set<SiteInst> siteInstsToRoute = new HashSet<>();

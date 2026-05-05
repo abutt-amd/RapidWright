@@ -945,12 +945,15 @@ public class ArrayBuilder {
                             if (config.isFlipPlacementHorizontally()) {
                                 // Search to the left
                                 physX--;
+                                if (physX < 0) {
+                                    throw new RuntimeException("Optimal placement is too wide for device");
+                                }
                             } else {
                                 // Search to the right
                                 physX++;
-                            }
-                            if (physX >= validPlacementGrid.get(physY).size()) {
-                                throw new RuntimeException("Optimal placement is too wide for device");
+                                if (physX >= validPlacementGrid.get(physY).size()) {
+                                    throw new RuntimeException("Optimal placement is too wide for device");
+                                }
                             }
                         } else {
                             // Search down from physY for valid placement
@@ -1087,7 +1090,7 @@ public class ArrayBuilder {
         array.setAutoIOBuffers(false);
     }
 
-    private static void unrouteStaticNets(Design design) {
+    public static void unrouteStaticNets(Design design) {
         Net gndNet = design.getNet(Net.GND_NET);
         if (gndNet != null) {
             gndNet.unroute();

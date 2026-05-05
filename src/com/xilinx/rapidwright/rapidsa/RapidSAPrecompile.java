@@ -37,12 +37,8 @@ import com.xilinx.rapidwright.edif.EDIFNet;
 import com.xilinx.rapidwright.edif.EDIFNetlist;
 import com.xilinx.rapidwright.edif.EDIFPort;
 import com.xilinx.rapidwright.edif.EDIFTools;
-import com.xilinx.rapidwright.rapidsa.components.DrainTile;
-import com.xilinx.rapidwright.rapidsa.components.EdgeBufferTile;
-import com.xilinx.rapidwright.rapidsa.components.GEMMTile;
-import com.xilinx.rapidwright.rapidsa.components.MM2SNOCChannel;
 import com.xilinx.rapidwright.rapidsa.components.RapidComponent;
-import com.xilinx.rapidwright.rapidsa.components.S2MMNOCChannel;
+import com.xilinx.rapidwright.rapidsa.components.ReluTile;
 import com.xilinx.rapidwright.util.ArrayBuilderSLRCrossingCreator;
 import com.xilinx.rapidwright.util.FileTools;
 import com.xilinx.rapidwright.util.PerformanceExplorer;
@@ -94,16 +90,17 @@ public class RapidSAPrecompile {
      * PerformanceExplorer run directory is also kept (not deleted) so the
      * results survive across runs. Toggle to false to force a fresh run.
      */
-    private static final boolean REUSE_PE_RESULTS = true;
+    private static final boolean REUSE_PE_RESULTS = false;
 
     private static final List<RapidComponent> COMPONENTS = Collections.unmodifiableList(
             Arrays.asList(
-                    new GEMMTile(4, 4),
-                    new EdgeBufferTile(4, EdgeBufferTile.Type.WEIGHT),
-                    new EdgeBufferTile(4, EdgeBufferTile.Type.INPUT),
-                    new DrainTile(4, 16),
-                    new MM2SNOCChannel(),
-                    new S2MMNOCChannel()
+//                    new GEMMTile(4, 4),
+//                    new EdgeBufferTile(4, EdgeBufferTile.Type.WEIGHT),
+//                    new EdgeBufferTile(4, EdgeBufferTile.Type.INPUT),
+//                    new DrainTile(4, 16),
+                    new ReluTile(4, 8)
+//                    new MM2SNOCChannel(),
+//                    new S2MMNOCChannel()
             )
     );
 

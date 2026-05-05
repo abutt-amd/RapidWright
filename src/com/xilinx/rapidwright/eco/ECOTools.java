@@ -22,17 +22,6 @@
 
 package com.xilinx.rapidwright.eco;
 
-import java.util.ArrayList;
-import java.util.Arrays;
-import java.util.Collections;
-import java.util.HashMap;
-import java.util.HashSet;
-import java.util.List;
-import java.util.Map;
-import java.util.Map.Entry;
-import java.util.Objects;
-import java.util.Set;
-
 import com.xilinx.rapidwright.design.AltPinMapping;
 import com.xilinx.rapidwright.design.Cell;
 import com.xilinx.rapidwright.design.Design;
@@ -61,6 +50,17 @@ import com.xilinx.rapidwright.edif.EDIFTools;
 import com.xilinx.rapidwright.rwroute.RouterHelper;
 import com.xilinx.rapidwright.util.Pair;
 import com.xilinx.rapidwright.util.Params;
+
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.Collections;
+import java.util.HashMap;
+import java.util.HashSet;
+import java.util.List;
+import java.util.Map;
+import java.util.Map.Entry;
+import java.util.Objects;
+import java.util.Set;
 
 /**
  * A collection of methods for performing ECO operations.
@@ -522,7 +522,7 @@ public class ECOTools {
                                 continue;
                             }
                             // TODO: Use getLeafHierPortInst() to get parent net?
-                            EDIFHierNet otherParentNet = netlist.getParentNet(otherEhpi.getHierarchicalNet());
+                            EDIFHierNet otherParentNet = otherEhpi.getHierarchicalNet().getLeafSourcePortInst().getHierarchicalNet();
                             if (!otherParentNet.equals(parentNet)) {
                                 // This SPI also services a different port inst that is connected to a
                                 // different net than the new one we're trying to connect up

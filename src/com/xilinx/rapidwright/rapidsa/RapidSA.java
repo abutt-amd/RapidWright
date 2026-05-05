@@ -25,7 +25,6 @@ package com.xilinx.rapidwright.rapidsa;
 
 import com.xilinx.rapidwright.design.Cell;
 import com.xilinx.rapidwright.design.Design;
-import com.xilinx.rapidwright.design.DesignTools;
 import com.xilinx.rapidwright.design.Module;
 import com.xilinx.rapidwright.design.ModuleInst;
 import com.xilinx.rapidwright.design.Net;
@@ -303,7 +302,7 @@ public class RapidSA {
 
         arrayDesign.flattenDesign();
         EDIFTools.uniqueifyNetlist(arrayDesign);
-        DesignTools.createMissingSitePinInsts(arrayDesign);
+//        DesignTools.createMissingSitePinInsts(arrayDesign);
 
         FlopTreeTools.insertFlopTreeForNet(arrayDesign, "sa_accum_shift", "clk", flopTreeDepth, maxDepthPerSLR, noGoBboxes);
         FlopTreeTools.insertFlopTreeForNet(arrayDesign, "output_wr_en", "clk", flopTreeDepth, maxDepthPerSLR, noGoBboxes);
@@ -347,7 +346,7 @@ public class RapidSA {
 //        arrayDesign.writeCheckpoint(baseDcpName + ".dcp");
 
         if (options.has("route")) {
-            arrayDesign.getNetlist().expandMacroUnisims();
+            ArrayBuilder.unrouteStaticNets(arrayDesign);
             System.out.println("** Running RWRoute partial route + HoldFixer on " + baseDcpName + ".dcp (softPreserve=true)");
             PartialCUFR.routeDesignWithUserDefinedArguments(arrayDesign,
                     new String[]{
