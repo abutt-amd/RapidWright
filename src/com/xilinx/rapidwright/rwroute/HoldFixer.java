@@ -350,6 +350,9 @@ public class HoldFixer {
     }
 
     private boolean couldHaveHoldViolation(SitePinInst sourcePin, SitePinInst sinkPin) {
+        if (sinkPin.getName().contains("weight_eb_x5/s_data_reg_reg[51]")) {
+            System.out.println();
+        }
         Site source = sourcePin.getSite();
         Site sink = sinkPin.getSite();
         ClockRegion sourceCR = source.getTile().getClockRegion();

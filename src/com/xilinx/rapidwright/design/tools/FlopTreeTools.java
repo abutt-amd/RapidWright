@@ -55,6 +55,7 @@ import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.stream.Collectors;
 
 public class FlopTreeTools {
 
@@ -125,13 +126,7 @@ public class FlopTreeTools {
         }
         EDIFTools.connectPortInstsThruHier(clk, clkHierPortInst, newNetName + "_clk");
         EDIFNet origNet = logicalNet.getNet();
-        int i = 0;
-        for (EDIFHierPortInst portInst : portInsts) {
-            if (portInst.isInput()) {
-                ECOTools.disconnectNet(design, portInst);
-            }
-            i++;
-        }
+        ECOTools.disconnectNet(design, portInsts.stream().filter(EDIFHierPortInst::isInput).collect(Collectors.toList()));
         Map<EDIFHierNet, List<EDIFHierPortInst>> netToPortInsts = new HashMap<>();
         netToPortInsts.put(net.getLogicalHierNet(), portInsts);
         ECOTools.connectNet(design, netToPortInsts, null);

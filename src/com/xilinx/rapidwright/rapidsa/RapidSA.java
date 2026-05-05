@@ -25,6 +25,7 @@ package com.xilinx.rapidwright.rapidsa;
 
 import com.xilinx.rapidwright.design.Cell;
 import com.xilinx.rapidwright.design.Design;
+import com.xilinx.rapidwright.design.DesignTools;
 import com.xilinx.rapidwright.design.Module;
 import com.xilinx.rapidwright.design.ModuleInst;
 import com.xilinx.rapidwright.design.Net;
@@ -54,6 +55,7 @@ import com.xilinx.rapidwright.rapidsa.components.MM2SNOCChannel;
 import com.xilinx.rapidwright.rapidsa.components.RapidComponent;
 import com.xilinx.rapidwright.rapidsa.components.S2MMNOCChannel;
 import com.xilinx.rapidwright.rwroute.PartialCUFR;
+import com.xilinx.rapidwright.tests.CodePerfTracker;
 import com.xilinx.rapidwright.util.Pair;
 import com.xilinx.rapidwright.util.VivadoTools;
 import joptsimple.OptionParser;
@@ -112,6 +114,9 @@ public class RapidSA {
 
         int nRows = (Integer) options.valueOf("rows");
         int nCols = (Integer) options.valueOf("cols");
+
+        CodePerfTracker t = new CodePerfTracker(ArrayBuilder.class.getName());
+        t.start("Init");
 
         Design sa = RapidSANetlistBuilder.createSystolicArrayNetlist(nRows, nCols, partName, "RapidSA");
 
@@ -298,6 +303,7 @@ public class RapidSA {
 
         arrayDesign.flattenDesign();
         EDIFTools.uniqueifyNetlist(arrayDesign);
+        DesignTools.createMissingSitePinInsts(arrayDesign);
 
         FlopTreeTools.insertFlopTreeForNet(arrayDesign, "sa_accum_shift", "clk", flopTreeDepth, maxDepthPerSLR, noGoBboxes);
         FlopTreeTools.insertFlopTreeForNet(arrayDesign, "output_wr_en", "clk", flopTreeDepth, maxDepthPerSLR, noGoBboxes);
@@ -350,8 +356,8 @@ public class RapidSA {
                     },
                     /*pinsToRoute=*/ null,
                     /*softPreserve=*/ false);
-            // HoldFixer holdFixer = new HoldFixer(arrayDesign, "clk");
-            // holdFixer.fixHoldViolations();
+//             HoldFixer holdFixer = new HoldFixer(arrayDesign, "clk");
+//             holdFixer.fixHoldViolations();
 
             arrayDesign.writeCheckpoint(baseDcpName + "_routed.dcp");
             System.out.println("** Wrote " + baseDcpName + "_routed.dcp");
@@ -382,6 +388,9 @@ public class RapidSA {
         if (options.has("report-timing") && !options.has("vivado-route")) {
             runReportTiming(baseDcpName, options);
         }
+
+        t.stop();
+        t.printSummary();
     }
 
     /**
