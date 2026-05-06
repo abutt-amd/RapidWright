@@ -58,9 +58,10 @@ public class TestModule {
     }
 
     @Test
-    public void testCorrespondingSLLTile() {
+    public void testGetCorrespondingTile() {
         Device v80 = Device.getDevice("xcv80");
 
+        // Testing for SLL to SLL_1 special case because they have the same tile type but overlapping X,Y grids
         Tile templateTile = v80.getTile("SLL_X23Y886");
         Tile originalAnchor = v80.getTile("CLE_W_CORE_X22Y886");
         Tile newAnchorTile = v80.getTile("CLE_W_CORE_X23Y900");

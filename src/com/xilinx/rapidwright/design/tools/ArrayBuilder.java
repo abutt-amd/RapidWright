@@ -532,8 +532,17 @@ public class ArrayBuilder {
         t.stop().start("Calculate ideal array placement");
         // Find instances in existing design
         modInstNames = getMatchingModuleInstanceNames(modules.get(0), array);
+        // Multi-SA: restrict to instances belonging to this segment.
+        String prefix = config.getInstanceNamePrefix();
+        if (prefix != null) {
+            int before = modInstNames.size();
+            modInstNames.removeIf(n -> !n.startsWith(prefix));
+            System.out.println("[ArrayBuilder] Filtered modInstNames to prefix '" + prefix
+                    + "': " + before + " -> " + modInstNames.size());
+        }
         if (modInstNames.isEmpty()) {
-            throw new RuntimeException("Failed to find module instances in top design that match kernel interface");
+            throw new RuntimeException("Failed to find module instances in top design that match kernel interface"
+                    + (prefix != null ? " (prefix='" + prefix + "')" : ""));
         }
         config.setInstCountLimit(modInstNames.size());
         Map<EDIFPort, PBlockSide> sideMap = null;
@@ -585,6 +594,7 @@ public class ArrayBuilder {
 
             if (config.getInputPlacementFileName() == null) {
                 m.calculateAllValidPlacements(getDevice());
+                filterValidPlacementsToTargetSLR(m, "kernel");
             }
             if (!getPBlocks().isEmpty()) {
                 m.setPBlock(getPBlocks().get(0));
@@ -604,6 +614,7 @@ public class ArrayBuilder {
             removeBUFGs(slrCrossing);
             slrCrossingModule = new Module(slrCrossing);
             slrCrossingModule.calculateAllValidPlacements(getDevice());
+            filterValidPlacementsToTargetSLR(slrCrossingModule, "slrCrossing");
             debugPrintSlrCrossingBboxExtent(slrCrossingModule, slrCrossing);
         }
         return idealPlacement;
@@ -615,6 +626,35 @@ public class ArrayBuilder {
      * whether {@link Module#getBoundingBox()} is undersized relative to the
      * tiles the module actually touches.
      */
+    /**
+     * If {@link ArrayBuilderConfig#getTargetSLR()} is set (>= 0), removes
+     * any anchor in {@code module.getAllValidPlacements()} that resolves to
+     * a site outside that SLR. This restricts {@link #createArray()} to a
+     * single SLR for use in multi-SA flows. No-op when no constraint is set.
+     */
+    private void filterValidPlacementsToTargetSLR(Module module, String label) {
+        int targetId = config.getTargetSLR();
+        if (targetId < 0) return;
+        java.util.List<com.xilinx.rapidwright.device.Site> placements =
+                module.getAllValidPlacements();
+        int before = placements.size();
+        try {
+            placements.removeIf(s -> s.getTile().getSLR().getId() != targetId);
+        } catch (UnsupportedOperationException e) {
+            throw new RuntimeException(
+                    "ArrayBuilderConfig.targetSLR is set but Module.getAllValidPlacements() "
+                            + "returned an immutable list; cannot filter. "
+                            + "Module: " + label, e);
+        }
+        int after = placements.size();
+        System.out.println("[ArrayBuilder] Filtered " + label + " valid placements to SLR "
+                + targetId + ": " + before + " -> " + after);
+        if (after == 0) {
+            throw new RuntimeException("No valid placements remain in SLR " + targetId
+                    + " for module '" + label + "' after SLR filtering");
+        }
+    }
+
     private static void debugPrintSlrCrossingBboxExtent(Module mod, Design slrCrossingDesign) {
         com.xilinx.rapidwright.design.RelocatableTileRectangle modBb = mod.getBoundingBox();
         System.out.println("[SLR-CROSSING BBOX] Module.getBoundingBox(): "

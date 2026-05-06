@@ -25,6 +25,7 @@ package com.xilinx.rapidwright.rapidsa;
 
 import com.xilinx.rapidwright.design.Cell;
 import com.xilinx.rapidwright.design.Design;
+import com.xilinx.rapidwright.design.DesignTools;
 import com.xilinx.rapidwright.design.Module;
 import com.xilinx.rapidwright.design.ModuleInst;
 import com.xilinx.rapidwright.design.Net;
@@ -33,6 +34,7 @@ import com.xilinx.rapidwright.design.SiteInst;
 import com.xilinx.rapidwright.design.tools.ArrayBuilder;
 import com.xilinx.rapidwright.design.tools.ArrayBuilderConfig;
 import com.xilinx.rapidwright.design.tools.FlopTreeTools;
+import com.xilinx.rapidwright.device.Device;
 import com.xilinx.rapidwright.device.Part;
 import com.xilinx.rapidwright.device.PartNameTools;
 import com.xilinx.rapidwright.device.SLR;
@@ -89,6 +91,8 @@ public class RapidSA {
         parser.accepts("flop-tree-depth", "Flop tree depth for control fanout (default: scales with array size)").withRequiredArg().ofType(Integer.class);
         parser.accepts("max-depth-per-slr", "Max flop tree depth within a single SLR (default: scales with flop-tree-depth)").withRequiredArg().ofType(Integer.class);
         parser.accepts("handshake-chain-depth", "Flop chain depth for s2mm_start/s2mm_done handshake nets that span the full array (default: scales with nRows)").withRequiredArg().ofType(Integer.class);
+        parser.accepts("accel-json", "Path to accel.json from pytorch-bridge; selects multi-SA flow").withRequiredArg();
+        parser.accepts("out-dcp", "Output DCP path for --accel-json multi-SA flow").withRequiredArg().defaultsTo("multi_sa.dcp");
         parser.accepts("help", "Print help message");
         joptsimple.OptionSet options = parser.parse(args);
 
@@ -108,6 +112,15 @@ public class RapidSA {
 
         if (options.has("precompile")) {
             RapidSAPrecompile.precompileRapidSAComponents("RapidSA", part, 2.0);
+            return;
+        }
+
+        if (options.has("accel-json")) {
+            try {
+                runMultiSAFlow(options, partName);
+            } catch (java.io.IOException e) {
+                throw new RuntimeException(e);
+            }
             return;
         }
 
@@ -1096,5 +1109,539 @@ public class RapidSA {
         }
 
         System.out.println("  ** PLACED S2MM: s2mm at " + bestAnchor);
+    }
+
+    // =========================================================================
+    // Multi-SA flow (--accel-json)
+    // =========================================================================
+
+    /**
+     * Bounds of one SA segment computed from the union of its placed GEMM
+     * kernel bounding boxes. Used as a per-SA reference for placing
+     * peripherals (WeightEB, InputEB, Drain, MM2S, S2MM, ReluTile) without
+     * colliding with sites that belong to a different SA in the same
+     * Design.
+     *
+     * IMPORTANT: deriving these bounds from the GEMM kernel module's actual
+     * footprint matters. Using the centroid map alone produces bounds ~half
+     * the kernel's height/width too small in each direction (since the
+     * centroid sits in the middle of the kernel's extent). Peripheral
+     * placements that only check {@code bb.getMinRow() > centroidBottom}
+     * end up landing inside the array's actual cell footprint.
+     */
+    private static class ArrayBounds {
+        final int topRow, bottomRow, leftCol, rightCol;
+        ArrayBounds(int top, int bot, int left, int right) {
+            this.topRow = top; this.bottomRow = bot;
+            this.leftCol = left; this.rightCol = right;
+        }
+        static ArrayBounds from(List<RelocatableTileRectangle> placedBboxes) {
+            if (placedBboxes == null || placedBboxes.isEmpty()) {
+                throw new IllegalArgumentException(
+                        "ArrayBounds.from: empty placed bbox list");
+            }
+            int top = Integer.MAX_VALUE, bot = Integer.MIN_VALUE;
+            int left = Integer.MAX_VALUE, right = Integer.MIN_VALUE;
+            for (RelocatableTileRectangle bb : placedBboxes) {
+                top = Math.min(top, bb.getMinRow());
+                bot = Math.max(bot, bb.getMaxRow());
+                left = Math.min(left, bb.getMinColumn());
+                right = Math.max(right, bb.getMaxColumn());
+            }
+            return new ArrayBounds(top, bot, left, right);
+        }
+    }
+
+    /**
+     * Multi-SA orchestration. Reads an accel.json layer chain, builds the
+     * combined netlist with SA-prefixed segments and ReluTile bridges, runs
+     * a per-SA {@link ArrayBuilder} pass constrained to one SLR, places the
+     * peripheral modules per-SA, places ReluTiles between SAs, and writes
+     * an unrouted DCP. Routing/flop-tree insertion are deferred to a later
+     * iteration.
+     */
+    private static void runMultiSAFlow(joptsimple.OptionSet options, String partName)
+            throws java.io.IOException {
+        String jsonPath = (String) options.valueOf("accel-json");
+        String outDcp = (String) options.valueOf("out-dcp");
+        String precompileDir = "RapidSA";
+
+        AccelConfig cfg = AccelConfig.parse(Paths.get(jsonPath));
+        List<AccelConfig.LinearLayer> linears = cfg.getLinearLayers();
+        System.out.println("** Multi-SA flow: " + jsonPath
+                + " (" + linears.size() + " linear layers, output -> " + outDcp + ")");
+        for (int i = 0; i < linears.size(); i++) {
+            AccelConfig.LinearLayer l = linears.get(i);
+            int er = RapidSANetlistBuilder.effectiveNRows(l, i);
+            int ec = RapidSANetlistBuilder.effectiveNCols(l, i);
+            System.out.printf("   SA[%d] %dx%d  paddedTileIn=%d paddedTileOut=%d%s%n",
+                    i, er, ec, l.paddedTileIn, l.paddedTileOut,
+                    (i == 0 ? "" : "  [rotated]"));
+        }
+        Device device = Device.getDevice(partName);
+        int slrCount = device.getSLRs().length;
+        if (linears.size() > slrCount) {
+            throw new RuntimeException("accel.json has " + linears.size()
+                    + " linear layers but device " + partName + " has only "
+                    + slrCount + " SLRs (one-SA-per-SLR layout)");
+        }
+
+        CodePerfTracker t = new CodePerfTracker(RapidSA.class.getName() + ".multiSA");
+        t.start("Build netlist");
+
+        // 1. Combined netlist (sa{i}_ prefixed instances, ReluTile bridges,
+        //    per-SA MM2S, single S2MM on last SA).
+        Design design = RapidSANetlistBuilder.createMultiSANetlist(
+                linears, partName, precompileDir);
+        attachAllMM2SAndReluAndS2MM(design, precompileDir, linears);
+
+        // 2. Load the kernel Design and the peripheral Modules (one each,
+        //    shared across all SAs — RapidWright's ModuleImpls requires
+        //    pointer-equal netlists across instances).
+        GEMMTile gemm44 = new GEMMTile(4, 4);
+        EdgeBufferTile weightEbComp = new EdgeBufferTile(4, EdgeBufferTile.Type.WEIGHT);
+        EdgeBufferTile inputEbComp = new EdgeBufferTile(4, EdgeBufferTile.Type.INPUT);
+        DrainTile drainComp = new DrainTile(4, 8);
+
+        // The kernel Design's routing/SiteInsts get consumed when an
+        // ArrayBuilder stamps it. So we re-read a fresh kernel from disk
+        // for each SA's pass — see {@link #loadFreshKernelDesign}.
+        String kernelDcp = precompileDir + File.separator
+                + gemm44.getComponentName() + File.separator + "pnr.dcp";
+
+        Module weightEbModule = loadRelocatableModule(precompileDir, weightEbComp, design);
+        Module inputEbModule = loadRelocatableModule(precompileDir, inputEbComp, design);
+        Module drainModule = loadRelocatableModule(precompileDir, drainComp, design);
+        Module mm2sModule = loadRelocatableModule(precompileDir,
+                new com.xilinx.rapidwright.rapidsa.components.MM2SNOCChannel(), design);
+        Module s2mmModule = loadRelocatableModule(precompileDir,
+                new com.xilinx.rapidwright.rapidsa.components.S2MMNOCChannel(), design);
+        Module reluModule = loadRelocatableModule(precompileDir,
+                new com.xilinx.rapidwright.rapidsa.components.ReluTile(4, 8), design);
+
+        // 3. Phase 1: per-SA ArrayBuilder.createArray() in order. Each call
+        //    flattens the design — doing them all up-front means peripheral
+        //    placements (Phase 2 below) happen on a stable design with no
+        //    intervening flattens, which is what Module/ModuleInst placement
+        //    needs in order to actually materialize SiteInsts.
+        List<ArrayBuilder> perSaBuilders = new ArrayList<>();
+        List<ArrayBounds> perSaBounds = new ArrayList<>();
+        List<RelocatableTileRectangle> globalNoGo = new ArrayList<>();
+
+        int last = linears.size() - 1;
+        for (int i = 0; i < linears.size(); i++) {
+            AccelConfig.LinearLayer layer = linears.get(i);
+            String prefix = "sa" + i + "_";
+            // SLR mapping: data flows top-to-bottom (SA[0] -> SA[1] -> ... -> SA[last]).
+            // SLR 0 sits at the BOTTOM of the device on Versal, so SA[0] goes in
+            // the TOPMOST SLR (highest id) and SA[last] in SLR 0.
+            int targetSlr = slrCount - 1 - i;
+            t.stop().start("SA[" + i + "] createArray (SLR " + targetSlr + ")");
+            // Fresh kernel per SA: ArrayBuilder consumes the kernel Design's
+            // routing/SiteInsts when it stamps tiles, so reusing the same
+            // kernel across SAs leaves later SAs' GEMM tiles unrouted.
+            Design kernel = Design.readCheckpoint(kernelDcp);
+            EDIFTools.removeVivadoBusPreventionAnnotations(kernel.getNetlist());
+            ArrayBuilderConfig saConfig = new ArrayBuilderConfig(kernel, design);
+            saConfig.setTopClockName("clk");
+            saConfig.setKernelClockName("clk");
+            saConfig.setOutOfContext(false);
+            saConfig.setRouteClock(false);
+            saConfig.setFlipPlacementHorizontally(true);
+            saConfig.setRowOffset(5);
+            saConfig.setColumnOffset(1);
+            saConfig.setTargetSLR(targetSlr);
+            saConfig.setInstanceNamePrefix(prefix);
+
+            ArrayBuilder ab = new ArrayBuilder(saConfig);
+            ab.initializeArrayBuilder();
+            ab.createArray();
+            perSaBuilders.add(ab);
+            ArrayBounds bounds = ArrayBounds.from(ab.getPlacedArrayBoundingBoxes());
+            perSaBounds.add(bounds);
+            globalNoGo.addAll(ab.getPlacedArrayBoundingBoxes());
+            System.out.println("  ** SA[" + i + "] placed in SLR " + targetSlr
+                    + ": rows " + bounds.topRow + ".." + bounds.bottomRow
+                    + ", cols " + bounds.leftCol + ".." + bounds.rightCol);
+        }
+
+        // 4. Phase 2: peripheral placement for every SA. No more flattens here —
+        //    every Module-instance placement persists into the final DCP.
+        t.stop().start("Place peripherals");
+        for (int i = 0; i < linears.size(); i++) {
+            AccelConfig.LinearLayer layer = linears.get(i);
+            int nRows = RapidSANetlistBuilder.effectiveNRows(layer, i);
+            int nCols = RapidSANetlistBuilder.effectiveNCols(layer, i);
+            String prefix = "sa" + i + "_";
+            boolean isRotated = (i != 0);
+            boolean hasInputEB = !isRotated;
+            boolean hasDrain = (i == last);
+            ArrayBuilder ab = perSaBuilders.get(i);
+            ArrayBounds bounds = perSaBounds.get(i);
+
+            if (!isRotated) {
+                placeWeightEBsAboveForSA(ab, prefix, nCols, weightEbModule,
+                        bounds, globalNoGo);
+            } else {
+                // Rotated SAs: the netlist instantiates the InputEdgeBuffer
+                // precompile (see buildArraySegment). Use the InputEB Module
+                // for placement so the relocation matches the cell type.
+                placeWeightEBsRightForSA(ab, prefix, nRows, inputEbModule,
+                        bounds, globalNoGo);
+            }
+            if (hasInputEB) {
+                placeInputEBsRightForSA(ab, prefix, nRows, inputEbModule,
+                        bounds, globalNoGo);
+            }
+            if (hasDrain) {
+                placeDrainsBelowForSA(ab, prefix, nCols, drainModule,
+                        bounds, globalNoGo);
+            }
+            placeMM2SForSA(ab, prefix, mm2sModule, bounds, globalNoGo);
+        }
+
+        // 5. ReluTile placement: stamped just below SA[i] (inside SA[i]'s SLR)
+        //    for each pair (i, i+1).
+        for (int i = 0; i + 1 < linears.size(); i++) {
+            AccelConfig.LinearLayer prev = linears.get(i);
+            int prevNCols = RapidSANetlistBuilder.effectiveNCols(prev, i);
+            placeReluTilesBetweenSAs(perSaBuilders.get(i), "sa" + i,
+                    "sa" + (i + 1), prevNCols, reluModule,
+                    perSaBounds.get(i), globalNoGo);
+        }
+
+        // 6. S2MM placement: bottom-right of last SA.
+        placeS2MMForSA(perSaBuilders.get(last), "s2mm", s2mmModule,
+                perSaBounds.get(last), globalNoGo);
+
+        t.stop().start("Finalize");
+
+        // 6. Flatten & finalize.
+        design.flattenDesign();
+        EDIFTools.uniqueifyNetlist(design);
+        DesignTools.createMissingSitePinInsts(design);
+        insertTopLevelBUFGCE(design);
+        design.addXDCConstraint("create_clock -period 4.0 -name clk [get_ports clk_in]");
+        design.setDesignOutOfContext(true);
+
+        design.writeCheckpoint(outDcp);
+        System.out.println("** Wrote " + outDcp);
+
+        t.stop();
+        t.printSummary();
+    }
+
+    /** Wires per-SA MM2S, ReluTile bridges, and the single S2MM into the netlist. */
+    private static void attachAllMM2SAndReluAndS2MM(Design design, String precompileDir,
+                                                    List<AccelConfig.LinearLayer> linears) {
+        int last = linears.size() - 1;
+        for (int i = 0; i < linears.size(); i++) {
+            AccelConfig.LinearLayer l = linears.get(i);
+            String prefix = "sa" + i + "_";
+            boolean hasInputEB = (i == 0);
+            boolean hasDrain = (i == last);
+            int nRows = RapidSANetlistBuilder.effectiveNRows(l, i);
+            int nCols = RapidSANetlistBuilder.effectiveNCols(l, i);
+            RapidSANetlistBuilder.attachMM2SForSA(design, precompileDir,
+                    prefix + "mm2s", prefix, nRows, nCols, hasInputEB, hasDrain);
+        }
+        for (int i = 0; i + 1 < linears.size(); i++) {
+            AccelConfig.LinearLayer prev = linears.get(i);
+            AccelConfig.LinearLayer next = linears.get(i + 1);
+            int prevR = RapidSANetlistBuilder.effectiveNRows(prev, i);
+            int prevC = RapidSANetlistBuilder.effectiveNCols(prev, i);
+            int nextR = RapidSANetlistBuilder.effectiveNRows(next, i + 1);
+            int nextC = RapidSANetlistBuilder.effectiveNCols(next, i + 1);
+            RapidSANetlistBuilder.attachReluBetweenSAs(design, precompileDir,
+                    "sa" + i + "_", prevR, prevC,
+                    "sa" + (i + 1) + "_", nextR, nextC);
+        }
+        RapidSANetlistBuilder.attachS2MMNOCChannel(design, precompileDir,
+                "s2mm", "sa" + last + "_drain_x0");
+        RapidSANetlistBuilder.connectIngressEgressChannelHandshake(design,
+                "sa" + last + "_mm2s", "s2mm");
+    }
+
+    // ----- Per-SA placement helpers (multi-SA flow only) -----
+
+    /**
+     * Picks the closest valid anchor for {@code module} that satisfies
+     * (a) module's full bbox stays within the target SLR
+     * (b) bbox does not overlap any existing no-go bbox
+     * (c) per-site no overlap with already-occupied tiles
+     * (d) {@code edgeCheck} returns true (geometric edge constraint, e.g.
+     *     "must be above arrayTopRow")
+     * Distance is Manhattan to {@code targetTile}.
+     */
+    private static Site findBestAnchor(Module module, Site targetSite, int targetSlrId,
+                                       List<RelocatableTileRectangle> noGoBboxes,
+                                       Set<Tile> occupiedTiles,
+                                       java.util.function.Predicate<RelocatableTileRectangle> edgeCheck) {
+        RelocatableTileRectangle moduleBox = module.getBoundingBox();
+        Tile targetTile = targetSite.getTile();
+        Site best = null;
+        int bestDist = Integer.MAX_VALUE;
+        for (Site anchor : module.getAllValidPlacements()) {
+            if (targetSlrId >= 0 && anchor.getTile().getSLR().getId() != targetSlrId) continue;
+            RelocatableTileRectangle candBb = moduleBox.getCorresponding(
+                    anchor.getTile(), module.getAnchor().getTile());
+            if (!edgeCheck.test(candBb)) continue;
+            boolean overlaps = false;
+            for (RelocatableTileRectangle existing : noGoBboxes) {
+                if (existing.overlaps(candBb)) { overlaps = true; break; }
+            }
+            if (overlaps) continue;
+            // Confirm bbox lies entirely within target SLR (relevant when bbox
+            // straddles an SLR boundary even though the anchor is inside).
+            if (targetSlrId >= 0) {
+                Tile minTile = anchor.getTile().getDevice().getTile(candBb.getMinRow(), candBb.getMinColumn());
+                Tile maxTile = anchor.getTile().getDevice().getTile(candBb.getMaxRow(), candBb.getMaxColumn());
+                if (minTile != null && minTile.getSLR().getId() != targetSlrId) continue;
+                if (maxTile != null && maxTile.getSLR().getId() != targetSlrId) continue;
+            }
+            int dist = Math.abs(anchor.getTile().getColumn() - targetTile.getColumn())
+                     + Math.abs(anchor.getTile().getRow() - targetTile.getRow());
+            if (dist < bestDist) { bestDist = dist; best = anchor; }
+        }
+        return best;
+    }
+
+    private static void recordPlacementBbox(Site placedAnchor, Module module,
+                                            List<RelocatableTileRectangle> noGoBboxes) {
+        RelocatableTileRectangle placedBb = module.getBoundingBox()
+                .getCorresponding(placedAnchor.getTile(), module.getAnchor().getTile());
+        noGoBboxes.add(placedBb);
+    }
+
+    /** Places nCols WeightEBs ABOVE this SA (standard orientation). */
+    private static void placeWeightEBsAboveForSA(ArrayBuilder ab, String prefix, int nCols,
+                                                  Module weightEbModule, ArrayBounds bounds,
+                                                  List<RelocatableTileRectangle> globalNoGo) {
+        Design arrayDesign = ab.getArray();
+        Map<Pair<Integer, Integer>, Site> centroids = ab.getLogicalToCentroidMap();
+        int slrId = centroids.values().iterator().next().getTile().getSLR().getId();
+        for (int col = 0; col < nCols; col++) {
+            Site target = centroids.get(new Pair<>(col, 0));
+            String instName = prefix + "weight_eb_x" + col;
+            ModuleInst mi = arrayDesign.createModuleInst(instName, weightEbModule);
+            final int arrayTopRow = bounds.topRow;
+            Site anchor = findBestAnchor(weightEbModule, target, slrId, globalNoGo,
+                    /*occupiedTiles=*/ java.util.Collections.emptySet(),
+                    bb -> bb.getMaxRow() < arrayTopRow);
+            if (anchor == null) {
+                throw new RuntimeException("No placement for " + instName + " (SLR " + slrId + ")");
+            }
+            if (!mi.place(anchor, false, false)) {
+                throw new RuntimeException("Failed to place " + instName + " at " + anchor);
+            }
+            recordPlacementBbox(anchor, weightEbModule, globalNoGo);
+            System.out.println("  ** PLACED WeightEB(above): " + instName + " at " + anchor);
+        }
+    }
+
+    /**
+     * Places nRows WeightEBs to the RIGHT of this SA (rotated orientation).
+     * Note on naming: even though the rotated SA's WeightEB drives ports
+     * named {@code west_inputs}, the array uses
+     * {@code setFlipPlacementHorizontally(true)} so the physical "west" pins
+     * land on the RIGHT side of the array. Place the EB chain accordingly.
+     */
+    private static void placeWeightEBsRightForSA(ArrayBuilder ab, String prefix, int nRows,
+                                                  Module weightEbModule, ArrayBounds bounds,
+                                                  List<RelocatableTileRectangle> globalNoGo) {
+        Design arrayDesign = ab.getArray();
+        Map<Pair<Integer, Integer>, Site> centroids = ab.getLogicalToCentroidMap();
+        int slrId = centroids.values().iterator().next().getTile().getSLR().getId();
+        // Find rightmost-column index from centroids to use as the per-row target.
+        int nCols = 0;
+        for (Pair<Integer, Integer> k : centroids.keySet())
+            nCols = Math.max(nCols, k.getFirst() + 1);
+        for (int row = 0; row < nRows; row++) {
+            Site target = centroids.get(new Pair<>(nCols - 1, row));
+            String instName = prefix + "weight_eb_y" + row;
+            ModuleInst mi = arrayDesign.createModuleInst(instName, weightEbModule);
+            final int arrayRightCol = bounds.rightCol;
+            Site anchor = findBestAnchor(weightEbModule, target, slrId, globalNoGo,
+                    java.util.Collections.emptySet(),
+                    bb -> bb.getMinColumn() > arrayRightCol);
+            if (anchor == null) {
+                throw new RuntimeException("No placement for " + instName + " (SLR " + slrId + ")");
+            }
+            if (!mi.place(anchor, false, false)) {
+                throw new RuntimeException("Failed to place " + instName + " at " + anchor);
+            }
+            recordPlacementBbox(anchor, weightEbModule, globalNoGo);
+            System.out.println("  ** PLACED WeightEB(right): " + instName + " at " + anchor);
+        }
+    }
+
+    /** Places nRows InputEBs to the RIGHT of this SA (standard SA[0] only). */
+    private static void placeInputEBsRightForSA(ArrayBuilder ab, String prefix, int nRows,
+                                                 Module inputEbModule, ArrayBounds bounds,
+                                                 List<RelocatableTileRectangle> globalNoGo) {
+        Design arrayDesign = ab.getArray();
+        Map<Pair<Integer, Integer>, Site> centroids = ab.getLogicalToCentroidMap();
+        int slrId = centroids.values().iterator().next().getTile().getSLR().getId();
+        // Find rightmost column index from centroids
+        int nCols = 0;
+        for (Pair<Integer, Integer> k : centroids.keySet())
+            nCols = Math.max(nCols, k.getFirst() + 1);
+        for (int row = 0; row < nRows; row++) {
+            Site target = centroids.get(new Pair<>(nCols - 1, row));
+            String instName = prefix + "input_eb_y" + row;
+            ModuleInst mi = arrayDesign.createModuleInst(instName, inputEbModule);
+            final int arrayRightCol = bounds.rightCol;
+            Site anchor = findBestAnchor(inputEbModule, target, slrId, globalNoGo,
+                    java.util.Collections.emptySet(),
+                    bb -> bb.getMinColumn() > arrayRightCol);
+            if (anchor == null) {
+                throw new RuntimeException("No placement for " + instName + " (SLR " + slrId + ")");
+            }
+            if (!mi.place(anchor, false, false)) {
+                throw new RuntimeException("Failed to place " + instName + " at " + anchor);
+            }
+            recordPlacementBbox(anchor, inputEbModule, globalNoGo);
+            System.out.println("  ** PLACED InputEB: " + instName + " at " + anchor);
+        }
+    }
+
+    /** Places nCols Drains BELOW this SA (last SA only). */
+    private static void placeDrainsBelowForSA(ArrayBuilder ab, String prefix, int nCols,
+                                               Module drainModule, ArrayBounds bounds,
+                                               List<RelocatableTileRectangle> globalNoGo) {
+        Design arrayDesign = ab.getArray();
+        Map<Pair<Integer, Integer>, Site> centroids = ab.getLogicalToCentroidMap();
+        int slrId = centroids.values().iterator().next().getTile().getSLR().getId();
+        int nRows = 0;
+        for (Pair<Integer, Integer> k : centroids.keySet())
+            nRows = Math.max(nRows, k.getSecond() + 1);
+        int accumCount = 4;
+        for (int col = 0; col < nCols; col++) {
+            Site target = centroids.get(new Pair<>(col, nRows - 1));
+            String instName = prefix + "drain_x" + col;
+            ModuleInst mi = arrayDesign.createModuleInst(instName, drainModule);
+            final int arrayBotRow = bounds.bottomRow;
+            Site anchor = findBestAnchor(drainModule, target, slrId, globalNoGo,
+                    java.util.Collections.emptySet(),
+                    bb -> bb.getMinRow() > arrayBotRow);
+            if (anchor == null) {
+                throw new RuntimeException("No placement for " + instName + " (SLR " + slrId + ")");
+            }
+            if (!mi.place(anchor, false, false)) {
+                throw new RuntimeException("Failed to place " + instName + " at " + anchor);
+            }
+            recordPlacementBbox(anchor, drainModule, globalNoGo);
+            DrainTile.setColumnElements(arrayDesign, instName, accumCount, 8);
+            int upstreamElements = (nCols - 1 - col) * accumCount;
+            DrainTile.setExternalUpstreamElements(arrayDesign, instName, upstreamElements, 8);
+            System.out.println("  ** PLACED Drain: " + instName + " at " + anchor);
+        }
+    }
+
+    /** Places this SA's MM2S at the top-right corner. */
+    private static void placeMM2SForSA(ArrayBuilder ab, String prefix, Module mm2sModule,
+                                        ArrayBounds bounds,
+                                        List<RelocatableTileRectangle> globalNoGo) {
+        Design arrayDesign = ab.getArray();
+        int slrId = ab.getLogicalToCentroidMap().values().iterator().next().getTile().getSLR().getId();
+        // Use the top-right tile as the placement target.
+        Site targetSite = null;
+        int bestKey = Integer.MAX_VALUE;
+        for (Map.Entry<Pair<Integer, Integer>, Site> e : ab.getLogicalToCentroidMap().entrySet()) {
+            int rank = e.getKey().getSecond() * 1000 - e.getKey().getFirst();
+            if (rank < bestKey) { bestKey = rank; targetSite = e.getValue(); }
+        }
+        String instName = prefix + "mm2s";
+        ModuleInst mi = arrayDesign.createModuleInst(instName, mm2sModule);
+        Site anchor = findBestAnchor(mm2sModule, targetSite, slrId, globalNoGo,
+                java.util.Collections.emptySet(), bb -> true);
+        if (anchor == null) {
+            throw new RuntimeException("No placement for " + instName + " (SLR " + slrId + ")");
+        }
+        if (!mi.place(anchor, false, false)) {
+            throw new RuntimeException("Failed to place " + instName + " at " + anchor);
+        }
+        recordPlacementBbox(anchor, mm2sModule, globalNoGo);
+        System.out.println("  ** PLACED MM2S: " + instName + " at " + anchor);
+    }
+
+    /** Places the single S2MM at bottom-right of the last SA. */
+    private static void placeS2MMForSA(ArrayBuilder ab, String instName, Module s2mmModule,
+                                        ArrayBounds bounds,
+                                        List<RelocatableTileRectangle> globalNoGo) {
+        Design arrayDesign = ab.getArray();
+        int slrId = ab.getLogicalToCentroidMap().values().iterator().next().getTile().getSLR().getId();
+        // Bottom-right tile target.
+        Site targetSite = null;
+        int bestKey = Integer.MIN_VALUE;
+        for (Map.Entry<Pair<Integer, Integer>, Site> e : ab.getLogicalToCentroidMap().entrySet()) {
+            int rank = e.getKey().getSecond() * 1000 + e.getKey().getFirst();
+            if (rank > bestKey) { bestKey = rank; targetSite = e.getValue(); }
+        }
+        ModuleInst mi = arrayDesign.createModuleInst(instName, s2mmModule);
+        Site anchor = findBestAnchor(s2mmModule, targetSite, slrId, globalNoGo,
+                java.util.Collections.emptySet(), bb -> true);
+        if (anchor == null) {
+            throw new RuntimeException("No placement for " + instName + " (SLR " + slrId + ")");
+        }
+        if (!mi.place(anchor, false, false)) {
+            throw new RuntimeException("Failed to place " + instName + " at " + anchor);
+        }
+        recordPlacementBbox(anchor, s2mmModule, globalNoGo);
+        System.out.println("  ** PLACED S2MM: " + instName + " at " + anchor);
+    }
+
+    /**
+     * Stamps {@code prevNCols} ReluTile_4 instances inside SA[i]'s SLR, just
+     * below SA[i]'s array. Names follow the netlist-builder convention
+     * ({@code sa{i}_to_sa{i+1}_relu_x{n}}). The relu bbox is required to be
+     * STRICTLY BELOW the prev SA (every row of the relu bbox > the array's
+     * bottom row), and to remain in the same SLR.
+     */
+    private static void placeReluTilesBetweenSAs(ArrayBuilder prevAb, String prevName,
+                                                  String nextName, int prevNCols,
+                                                  Module reluModule, ArrayBounds prevBounds,
+                                                  List<RelocatableTileRectangle> globalNoGo) {
+        Design arrayDesign = prevAb.getArray();
+        int slrId = prevAb.getLogicalToCentroidMap().values().iterator().next()
+                .getTile().getSLR().getId();
+        Map<Pair<Integer, Integer>, Site> centroids = prevAb.getLogicalToCentroidMap();
+        int prevNRows = 0;
+        for (Pair<Integer, Integer> k : centroids.keySet())
+            prevNRows = Math.max(prevNRows, k.getSecond() + 1);
+        // Diagnostic: log the relu module bbox dims so we can verify the
+        // "strictly below" check is operating on the geometry we expect.
+        RelocatableTileRectangle reluBox = reluModule.getBoundingBox();
+        System.out.println("  ** ReluTile bbox: rows " + reluBox.getMinRow() + ".."
+                + reluBox.getMaxRow() + ", cols " + reluBox.getMinColumn() + ".."
+                + reluBox.getMaxColumn() + "  (SA bottomRow=" + prevBounds.bottomRow + ")");
+        for (int idx = 0; idx < prevNCols; idx++) {
+            Site target = centroids.get(new Pair<>(idx, prevNRows - 1));
+            String instName = prevName + "_to_" + nextName + "_relu_x" + idx;
+            ModuleInst mi = arrayDesign.createModuleInst(instName, reluModule);
+            final int arrayBotRow = prevBounds.bottomRow;
+            // Strict vertical separation: the relu bbox must lie entirely
+            // below the prev SA's bottom row (both top and bottom edges of
+            // the relu bbox > arrayBotRow). minRow > arrayBotRow implies
+            // maxRow > arrayBotRow too (bbox invariant), so one check covers
+            // both. Adding a redundant maxRow check anyway as belt-and-braces
+            // in case any future bbox normalization makes the implication false.
+            Site anchor = findBestAnchor(reluModule, target, slrId, globalNoGo,
+                    java.util.Collections.emptySet(),
+                    bb -> bb.getMinRow() > arrayBotRow && bb.getMaxRow() > arrayBotRow);
+            if (anchor == null) {
+                throw new RuntimeException("No placement for " + instName + " (SLR " + slrId
+                        + ", strictly below row " + arrayBotRow + ")");
+            }
+            if (!mi.place(anchor, false, false)) {
+                throw new RuntimeException("Failed to place " + instName + " at " + anchor);
+            }
+            recordPlacementBbox(anchor, reluModule, globalNoGo);
+            // Verify the placed bbox is actually strictly below.
+            RelocatableTileRectangle placedBb = reluModule.getBoundingBox()
+                    .getCorresponding(anchor.getTile(), reluModule.getAnchor().getTile());
+            System.out.println("  ** PLACED ReluTile: " + instName + " at " + anchor
+                    + "  bbox rows " + placedBb.getMinRow() + ".." + placedBb.getMaxRow());
+        }
     }
 }
