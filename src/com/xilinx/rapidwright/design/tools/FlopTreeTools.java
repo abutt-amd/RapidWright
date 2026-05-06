@@ -368,7 +368,7 @@ public class FlopTreeTools {
 
     private static Pair<Site, Net> placeFlopNearCentroidOfPortInsts(Design design, String clkName, Net inputNet,
                                                                     String newNetName, List<EDIFHierPortInst> portInsts,
-                                                                    Set<SiteInst> siteInstsToRoute) {
+                                                                    Set<SiteInst> siteInstsToRoute, SLR requiredSLR) {
         Site centroid = findCentroidOfPortInsts(design, portInsts);
 
         if (centroid == null) {
@@ -376,12 +376,26 @@ public class FlopTreeTools {
         }
 
         Iterator<Site> siteItr = applyNoGoFilter(ECOPlacementHelper.spiralOutFrom(centroid).iterator());
-        Pair<Site, BEL> loc = nextAvailFlopPlacement(design, siteItr, null);
+        Pair<Site, BEL> loc = nextAvailFlopPlacement(design, siteItr, requiredSLR);
         if (loc == null) {
-            throw new RuntimeException("Failed to find location to place flop in flop tree");
+            throw new RuntimeException("Failed to find location to place flop in flop tree"
+                    + (requiredSLR != null ? " (required SLR " + requiredSLR.getId() + ")" : ""));
+        }
+        if (requiredSLR != null && loc.getFirst().getTile().getSLR() != requiredSLR) {
+            throw new RuntimeException("Placed flop " + newNetName + " at site " + loc.getFirst()
+                    + " in SLR " + loc.getFirst().getTile().getSLR().getId()
+                    + " but required SLR " + requiredSLR.getId());
         }
         Pair<Cell, Net> flopNetPair = createAndPlaceFlopForTree(design, inputNet.getLogicalHierNet(), newNetName, loc,
                 design.getNetlist().getHierNetFromName(clkName), portInsts);
+        if (requiredSLR != null) {
+            Site placed = flopNetPair.getFirst().getSiteInst().getSite();
+            if (placed.getTile().getSLR() != requiredSLR) {
+                throw new RuntimeException("Flop tree flop " + newNetName + " landed at " + placed
+                        + " (SLR " + placed.getTile().getSLR().getId() + ") but required SLR "
+                        + requiredSLR.getId());
+            }
+        }
         siteInstsToRoute.add(flopNetPair.getFirst().getSiteInst());
         return new Pair<>(centroid, flopNetPair.getSecond());
     }
@@ -402,7 +416,7 @@ public class FlopTreeTools {
                 List<EDIFHierPortInst> portInsts = pair.getSecond();
                 String newNetName = netName.replace(EDIFTools.EDIF_HIER_SEP, "_") + "_slr" + slr.getId() + "_d" + currDepth + "_" + i;
                 Pair<Site, Net> centroidNetPair = placeFlopNearCentroidOfPortInsts(design, clkName, net, newNetName,
-                        portInsts, siteInstsToRoute);
+                        portInsts, siteInstsToRoute, slr);
 
                 Site centroid = centroidNetPair.getFirst();
                 Net newNet = centroidNetPair.getSecond();
@@ -428,41 +442,50 @@ public class FlopTreeTools {
     }
 
     /**
-     * Builds a single shared chain of SLR crossings from the source SLR down to
-     * {@code maxSlrDist} SLR boundaries away. Pace flops are inserted in each
-     * inter-boundary segment, and a top/bottom pair is placed at each SLR boundary.
-     * Returns a map keyed by SLR id giving the net usable as the in-SLR fanout
-     * source for that SLR (i.e. the bottom-flop output net of the crossing into
-     * each downstream SLR). The source SLR's entry is NOT included; the caller
-     * already has {@code net} for that.
+     * Builds a per-destination chain of SLR crossings from the source SLR down to
+     * a single {@code targetSLR}, with the given source-side pacing depth in each
+     * pre-crossing segment. Returns the bottom flop's net of the final crossing
+     * (the tap usable as the in-target-SLR fanout source).
      *
      * Currently only handles downward traversal (sinks physically below source
-     * = larger tile rows). The {@code srcChainDepth} budget is split evenly
-     * across the {@code maxSlrDist} segments (source→boundary 0, boundary 0
-     * bottom→boundary 1, ...), with extras going to the earliest segments.
+     * = larger tile rows). {@code srcSegmentDepths.length} must equal the number
+     * of crossings (i.e. {@code |targetSLR.id - sourceSLR.id|}).
      */
-    private static Map<Integer, Net> insertSLRCrossingChain(Design design, Net net, String clkName,
-                                                             int maxSlrDist,
-                                                             int srcChainDepth,
-                                                             List<EDIFHierPortInst> otherSLRPortInsts,
-                                                             Set<SiteInst> siteInstsToRoute) {
-        Map<Integer, Net> tapsBySLRId = new HashMap<>();
+    private static Net insertSourceChainToSLR(Design design, Net net, String clkName,
+                                               int[] srcSegmentDepths,
+                                               SLR targetSLR,
+                                               List<EDIFHierPortInst> targetSLRPortInsts,
+                                               Set<SiteInst> siteInstsToRoute) {
+        int numCrossings = srcSegmentDepths.length;
+        if (numCrossings == 0) return net;
+
         Cell sourceCell = net.getLogicalHierNet().getSourcePortInsts(false).get(0).getPhysicalCell(design);
         Site sourceSite = sourceCell.getSite();
         SLR sourceSLR = sourceSite.getTile().getSLR();
-        String slrCrossingNamePrefix = net.getName().replace(EDIFTools.EDIF_HIER_SEP, "_") + "_slr_xing";
+        String slrCrossingNamePrefix = net.getName().replace(EDIFTools.EDIF_HIER_SEP, "_")
+                + "_slr_xing_to_slr" + targetSLR.getId();
 
-        int chainPerSegment = srcChainDepth / maxSlrDist;
-        int chainExtra = srcChainDepth % maxSlrDist;
+        System.out.println("[FlopTree] insertSourceChainToSLR net=" + net.getName()
+                + " sourceSLR=" + sourceSLR.getId()
+                + " sourceSite=" + sourceSite.getName()
+                + " targetSLR=" + targetSLR.getId()
+                + " numCrossings=" + numCrossings
+                + " srcSegmentDepths=" + Arrays.toString(srcSegmentDepths));
 
         Net currentNet = net;
         int currentRow = sourceSite.getTile().getRow();
         int currentCol = sourceSite.getTile().getColumn();
         SLR currentSLR = sourceSLR;
 
-        for (int crossingIdx = 0; crossingIdx < maxSlrDist; crossingIdx++) {
+        for (int crossingIdx = 0; crossingIdx < numCrossings; crossingIdx++) {
             int boundaryRow = currentSLR.getLowerRight().getRow();
-            int thisChainDepth = chainPerSegment + (crossingIdx < chainExtra ? 1 : 0);
+            int thisChainDepth = srcSegmentDepths[crossingIdx];
+            System.out.println("[FlopTree]   crossing " + crossingIdx
+                    + " currentSLR=" + currentSLR.getId()
+                    + " currentRow=" + currentRow
+                    + " currentCol=" + currentCol
+                    + " boundaryRow=" + boundaryRow
+                    + " segmentChainDepth=" + thisChainDepth);
 
             // Source-side pacing chain for THIS segment: from currentRow → boundaryRow.
             for (int i = 0; i < thisChainDepth; i++) {
@@ -472,17 +495,21 @@ public class FlopTreeTools {
                 points.add(new Point(currentCol, row));
                 Site target = ECOPlacementHelper.getCentroidOfPoints(design.getDevice(), points, VALID_CENTROID_SITE_TYPES);
                 Iterator<Site> chainItr = applyNoGoFilter(ECOPlacementHelper.spiralOutFrom(target).iterator());
-                Pair<Site, BEL> chainLoc = nextAvailFlopPlacement(design, chainItr, null);
+                Pair<Site, BEL> chainLoc = nextAvailFlopPlacement(design, chainItr, currentSLR);
+                if (chainLoc == null) {
+                    throw new RuntimeException("Failed to place src pacing flop in SLR " + currentSLR.getId()
+                            + " for crossing " + crossingIdx + " of net " + net.getName());
+                }
                 Pair<Cell, Net> chainPair = createAndPlaceFlopForTree(design, currentNet.getLogicalHierNet(),
                         slrCrossingNamePrefix + "_xing" + crossingIdx + "_src_ff" + i, chainLoc,
-                        design.getNetlist().getHierNetFromName(clkName), otherSLRPortInsts);
+                        design.getNetlist().getHierNetFromName(clkName), targetSLRPortInsts);
                 siteInstsToRoute.add(chainPair.getFirst().getSiteInst());
                 currentNet = chainPair.getSecond();
             }
 
             // Top flop at the SLR boundary, constrained to land within
             // MAX_SLR_XING_TOP_FROM_BOUNDARY_ROWS tile rows of the boundary.
-            String topName = slrCrossingNamePrefix + (maxSlrDist == 1
+            String topName = slrCrossingNamePrefix + (numCrossings == 1
                     ? "_top"
                     : "_xing" + crossingIdx + "_top");
             Site firstSLRSite = getNearestValidSite(design, boundaryRow, currentCol);
@@ -501,7 +528,7 @@ public class FlopTreeTools {
             }
             Pair<Cell, Net> topNetCellPair = createAndPlaceFlopForTree(design, currentNet.getLogicalHierNet(),
                     topName, loc,
-                    design.getNetlist().getHierNetFromName(clkName), otherSLRPortInsts);
+                    design.getNetlist().getHierNetFromName(clkName), targetSLRPortInsts);
             siteInstsToRoute.add(topNetCellPair.getFirst().getSiteInst());
 
             // Bottom flop one SLL hop below where the top flop actually landed.
@@ -510,7 +537,7 @@ public class FlopTreeTools {
             int actualTopCol = placedTopSite.getTile().getColumn();
             int bottomTargetRow = actualTopRow + SLL_WIRE_LENGTH_ROWS;
 
-            String bottomName = slrCrossingNamePrefix + (maxSlrDist == 1
+            String bottomName = slrCrossingNamePrefix + (numCrossings == 1
                     ? "_bottom"
                     : "_xing" + crossingIdx + "_bottom");
             Site secondSLRSite = getNearestValidSite(design, bottomTargetRow, actualTopCol);
@@ -518,20 +545,22 @@ public class FlopTreeTools {
             Pair<Site, BEL> bottomLoc = nextAvailFlopPlacement(design, bottomItr, null);
             Pair<Cell, Net> bottomNetCellPair = createAndPlaceFlopForTree(design,
                     topNetCellPair.getSecond().getLogicalHierNet(), bottomName, bottomLoc,
-                    design.getNetlist().getHierNetFromName(clkName), otherSLRPortInsts);
+                    design.getNetlist().getHierNetFromName(clkName), targetSLRPortInsts);
             siteInstsToRoute.add(bottomNetCellPair.getFirst().getSiteInst());
 
-            // Advance state for the next crossing iteration. Record the bottom
-            // flop's net as the tap point for the SLR it landed in.
+            // Advance state for the next crossing iteration.
             currentNet = bottomNetCellPair.getSecond();
             Site placedBottomSite = bottomNetCellPair.getFirst().getSiteInst().getSite();
             currentRow = placedBottomSite.getTile().getRow();
             currentCol = placedBottomSite.getTile().getColumn();
             currentSLR = placedBottomSite.getTile().getSLR();
-            tapsBySLRId.put(currentSLR.getId(), currentNet);
         }
 
-        return tapsBySLRId;
+        if (currentSLR != targetSLR) {
+            throw new RuntimeException("Source chain to SLR " + targetSLR.getId()
+                    + " ended in SLR " + currentSLR.getId() + " for net " + net.getName());
+        }
+        return currentNet;
     }
 
     public static Net insertFlopChain(Design design, Net net, String clkName, int depth,
@@ -618,59 +647,57 @@ public class FlopTreeTools {
         Site sourceSite = sourceCell.getSite();
         SLR sourceSLR = sourceSite.getTile().getSLR();
 
-        // Build one shared SLR-crossing chain from the source SLR down to the
-        // furthest destination SLR. Each downstream SLR taps off the bottom flop
-        // of the crossing into it. Allocates the global source-side chain budget
-        // based on the deepest destination's depth budget.
+        // Build a per-destination chain of crossings + pacing for each
+        // destination SLR. Each destination gets its own source-to-target path
+        // so its pacing budget (extra = newDepth - maxDepthPerSLR) can be split
+        // evenly across (slrDist + 1) segments without sharing a chain that
+        // starves the deepest SLR's dst-side share.
         int maxSlrDist = 0;
         for (SLR slr : slrPortInstMap.keySet()) {
             maxSlrDist = Math.max(maxSlrDist, Math.abs(slr.getId() - sourceSLR.getId()));
         }
-        Map<Integer, Net> tapsBySLRId = new HashMap<>();
-        tapsBySLRId.put(sourceSLR.getId(), topNet);
-        int globalSrcChainDepth = 0;
-        if (maxSlrDist > 0) {
-            int newDepthDeepest = depth - 2 * maxSlrDist;
-            globalSrcChainDepth = Math.max(0, newDepthDeepest - maxDepthPerSLR);
-
-            // Collect all sinks not in the source SLR for centroid-aware placement
-            // inside the chain helper.
-            List<EDIFHierPortInst> remoteSinks = new ArrayList<>();
-            for (Map.Entry<SLR, List<EDIFHierPortInst>> e : slrPortInstMap.entrySet()) {
-                if (e.getKey().getId() != sourceSLR.getId()) {
-                    remoteSinks.addAll(e.getValue());
-                }
-            }
-            tapsBySLRId.putAll(insertSLRCrossingChain(design, topNet, clkName, maxSlrDist,
-                    globalSrcChainDepth, remoteSinks, siteInstsToRoute));
-        }
-
-        // Per-segment chain depths (must mirror the split inside insertSLRCrossingChain
-        // so we can compute how many src-chain stages each destination already
-        // consumed when picking up its tap).
-        int chainPerSegment = maxSlrDist > 0 ? globalSrcChainDepth / maxSlrDist : 0;
-        int chainExtra = maxSlrDist > 0 ? globalSrcChainDepth % maxSlrDist : 0;
+        System.out.println("[FlopTree] insertFlopTreeForNet net=" + netName
+                + " depth=" + depth
+                + " maxDepthPerSLR=" + maxDepthPerSLR
+                + " sourceSLR=" + sourceSLR.getId()
+                + " sinkSLRs=" + slrPortInstMap.keySet().stream().map(s -> Integer.toString(s.getId())).sorted().collect(Collectors.joining(","))
+                + " maxSlrDist=" + maxSlrDist);
 
         for (Map.Entry<SLR, List<EDIFHierPortInst>> slrPortInsts : slrPortInstMap.entrySet()) {
             SLR slr = slrPortInsts.getKey();
             List<EDIFHierPortInst> portInsts = slrPortInsts.getValue();
             int slrDistFromSource = Math.abs(slr.getId() - sourceSLR.getId());
             int newDepth = depth - (2 * slrDistFromSource);
-
-            // How many src-chain stages did this destination's path already
-            // consume in the shared chain (segments 0..slrDist-1)?
-            int srcChainConsumed = 0;
-            for (int i = 0; i < slrDistFromSource; i++) {
-                srcChainConsumed += chainPerSegment + (i < chainExtra ? 1 : 0);
-            }
             int extra = Math.max(0, newDepth - maxDepthPerSLR);
-            int dstChainDepth = Math.max(0, extra - srcChainConsumed);
             int treeDepth = Math.min(newDepth, maxDepthPerSLR);
 
-            Net slrCrossedNet = tapsBySLRId.get(slr.getId());
-            if (slrCrossedNet == null) {
-                throw new RuntimeException("No tap net found for SLR " + slr.getId()
-                        + " when fanning out " + netName);
+            // Even split across (slrDist + 1) segments: slrDist source-side
+            // segments (one per crossing) plus one dst-side segment in the
+            // target SLR. Remainders go to the earliest segments.
+            int totalSegments = slrDistFromSource + 1;
+            int basePerSegment = extra / totalSegments;
+            int remainder = extra % totalSegments;
+            int[] srcSegmentDepths = new int[slrDistFromSource];
+            for (int i = 0; i < slrDistFromSource; i++) {
+                srcSegmentDepths[i] = basePerSegment + (i < remainder ? 1 : 0);
+            }
+            int dstChainDepth = basePerSegment + (slrDistFromSource < remainder ? 1 : 0);
+
+            System.out.println("[FlopTree]   SLR " + slr.getId()
+                    + " sinks=" + portInsts.size()
+                    + " slrDistFromSource=" + slrDistFromSource
+                    + " newDepth=" + newDepth
+                    + " extra=" + extra
+                    + " srcSegmentDepths=" + Arrays.toString(srcSegmentDepths)
+                    + " dstChainDepth=" + dstChainDepth
+                    + " treeDepth=" + treeDepth);
+
+            Net slrCrossedNet;
+            if (slrDistFromSource == 0) {
+                slrCrossedNet = topNet;
+            } else {
+                slrCrossedNet = insertSourceChainToSLR(design, topNet, clkName, srcSegmentDepths,
+                        slr, portInsts, siteInstsToRoute);
             }
             if (dstChainDepth > 0) {
                 slrCrossedNet = insertFlopChain(design, slrCrossedNet, clkName, dstChainDepth, portInsts,
