@@ -74,6 +74,7 @@ public class ArrayBuilderSLRCrossingCreator {
     private static final double DEFAULT_MAX_CLK_UNCERT = 0.250;
     private static final double DEFAULT_STEP_CLK_UNCERT = 0.025;
     private static final double DEFAULT_BASE_CLK_UNCERT = 0.300;
+    private static final int MAX_SLR_CROSSING_PBLOCK_SEPARATION_ROWS = 200;
 
     private static OptionParser createOptionParser() {
         return new OptionParser() {
@@ -89,32 +90,61 @@ public class ArrayBuilderSLRCrossingCreator {
         };
     }
 
-    private static List<PBlock> getCandidateBottomPBlocks(Module module, PBlock topPBlock, int topAnchorIndex) {
+    private static PBlock copyPBlock(PBlock pblock) {
+        return new PBlock(pblock.getDevice(), pblock.toString());
+    }
+
+    private static PBlock movePBlockCopy(PBlock pblock, int dy) {
+        PBlock moved = copyPBlock(pblock);
+        return moved.movePBlock(0, dy) ? moved : null;
+    }
+
+    private static boolean pblockCornerTilesAreInSLR(PBlock pblock, SLR slr) {
+        return slr.containsTile(pblock.getTopLeftTile())
+                && slr.containsTile(pblock.getTopRightTile())
+                && slr.containsTile(pblock.getBottomLeftTile())
+                && slr.containsTile(pblock.getBottomRightTile());
+    }
+
+    /**
+     * Move {@code pblockTemplate} so its bottom edge is as close as possible
+     * to the bottom of {@code topSLR} while the whole PBlock remains inside
+     * that SLR. This deliberately depends on PBlock geometry, not on the
+     * module's last valid anchor row. Small slice-only modules (for example
+     * BufferTile) can have valid anchors far below where a larger crossing
+     * PBlock can legally fit, which otherwise pushes the top PBlock too low.
+     */
+    private static PBlock createTopPBlockAtBottomOfSLR(PBlock pblockTemplate, SLR topSLR) {
+        int originalBottomRow = pblockTemplate.getBottomLeftTile().getRow();
+        int slrBottomRow = topSLR.getLowerRight().getRow();
+        int slrTopRow = topSLR.getUpperLeft().getRow();
+
+        for (int targetBottomRow = slrBottomRow; targetBottomRow >= slrTopRow; targetBottomRow--) {
+            int dy = targetBottomRow - originalBottomRow;
+            PBlock candidate = movePBlockCopy(pblockTemplate, dy);
+            if (candidate != null && pblockCornerTilesAreInSLR(candidate, topSLR)) {
+                return candidate;
+            }
+        }
+        throw new RuntimeException("Failed to move top pblock inside SLR " + topSLR.getId()
+                + " using template " + pblockTemplate);
+    }
+
+    private static List<PBlock> getCandidateBottomPBlocks(PBlock topPBlock) {
         List<PBlock> candidates = new ArrayList<>();
-        List<List<Site>> validPlacementGrid = ArrayBuilder.getValidPlacementGrid(module);
         int pBlockHeight = topPBlock.getBottomLeftTile().getRow() - topPBlock.getTopLeftTile().getRow();
-        Site topAnchor = validPlacementGrid.get(topAnchorIndex).get(0);
-        Site lastAnchor = topAnchor;
-        for (int i = topAnchorIndex; i < validPlacementGrid.size(); i++) {
-            Site candidateAnchor = validPlacementGrid.get(i).get(0);
-            int yOffsetFromLast = candidateAnchor.getTile().getRow() - lastAnchor.getTile().getRow();
-            if (yOffsetFromLast < pBlockHeight) {
-                // Would create overlap with other pblock
+        SLR topSLR = topPBlock.getTopLeftTile().getSLR();
+        for (int yOffsetFromTop = pBlockHeight + 1;
+             yOffsetFromTop <= MAX_SLR_CROSSING_PBLOCK_SEPARATION_ROWS;
+             yOffsetFromTop++) {
+            PBlock bottomPBlock = movePBlockCopy(topPBlock, yOffsetFromTop);
+            if (bottomPBlock == null) {
                 continue;
             }
-            int yOffsetFromTop = candidateAnchor.getTile().getRow() - topAnchor.getTile().getRow();
-            if (yOffsetFromTop > 200) {
-                // Past reasonable range of SLL connections
-                break;
-            }
-            PBlock bottomPBlock = new PBlock(module.getDevice(), topPBlock.getAllSites(null));
-            boolean wasMoved = bottomPBlock.movePBlock(0, yOffsetFromTop);
-            if (!wasMoved) {
-//                throw new RuntimeException("Failed to move pblock");
+            if (bottomPBlock.getTopLeftTile().getSLR() == topSLR) {
                 continue;
             }
             candidates.add(bottomPBlock);
-            lastAnchor = candidateAnchor;
         }
         return candidates;
     }
@@ -268,29 +298,7 @@ public class ArrayBuilderSLRCrossingCreator {
         module.calculateAllValidPlacements(kernelDesign.getDevice());
         List<List<Site>> validPlacementGrid = ArrayBuilder.getValidPlacementGrid(module);
 
-        int lastAnchorInSLRIndex = -1;
-
-        int xCoordinate = 0;
-        int x = 0;
-        for (Site site : validPlacementGrid.get(0)) {
-            if (site.getInstanceX() == module.getAnchor().getInstanceX()) {
-                xCoordinate = x;
-                break;
-            }
-            x++;
-        }
-
         SLR firstSLR = validPlacementGrid.get(0).get(0).getTile().getSLR();
-
-        int i = 0;
-        for (List<Site> sites : validPlacementGrid) {
-            Site anchor = sites.get(xCoordinate);
-            if (anchor.getTile().getSLR() != firstSLR) {
-                break;
-            }
-            lastAnchorInSLRIndex = i;
-            i++;
-        }
 
         // Merge encrypted cells
         List<String> encryptedCells = module.getNetlist().getEncryptedCells();
@@ -310,18 +318,15 @@ public class ArrayBuilderSLRCrossingCreator {
             throw new RuntimeException("Instance name " + bottomInstName + " is invalid");
         }
 
-        Site lastAnchorInSLR = validPlacementGrid.get(lastAnchorInSLRIndex).get(xCoordinate);
-        assert lastAnchorInSLR != null;
-        int topOffsetY = lastAnchorInSLR.getTile().getRow() - module.getAnchor().getTile().getRow();
-
-        PBlock topPBlock = new PBlock(kernelDesign.getDevice(), pblock.getAllSites(null));
+        PBlock topPBlock = createTopPBlockAtBottomOfSLR(pblock, firstSLR);
         topPBlock.setName("pblock_0");
-        boolean wasMoved = topPBlock.movePBlock(0, topOffsetY);
-        if (!wasMoved) {
-            throw new RuntimeException("Failed to move top pblock to bottom of SLR");
-        }
+        System.out.println("[SLR-CROSSING] firstSLR=" + firstSLR.getId()
+                + " moduleAnchor=" + module.getAnchor()
+                + " topPBlockRows=" + topPBlock.getTopLeftTile().getRow()
+                + ".." + topPBlock.getBottomLeftTile().getRow());
 
-        List<PBlock> candidates = getCandidateBottomPBlocks(module, topPBlock, lastAnchorInSLRIndex);
+        List<PBlock> candidates = getCandidateBottomPBlocks(topPBlock);
+        System.out.println("[SLR-CROSSING] bottom pblock candidates=" + candidates.size());
         PBlock bottomPBlock = chooseBestCandidate(topPBlock, candidates);
         bottomPBlock.setName("pblock_1");
 

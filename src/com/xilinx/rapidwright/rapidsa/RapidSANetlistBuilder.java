@@ -36,6 +36,7 @@ import com.xilinx.rapidwright.edif.EDIFTools;
 import com.xilinx.rapidwright.rapidsa.components.DrainTile;
 import com.xilinx.rapidwright.rapidsa.components.GEMMTile;
 import com.xilinx.rapidwright.rapidsa.components.MM2SNOCChannel;
+import com.xilinx.rapidwright.rapidsa.components.BufferTile;
 import com.xilinx.rapidwright.rapidsa.components.EdgeBufferTile;
 import com.xilinx.rapidwright.rapidsa.components.RapidComponent;
 import com.xilinx.rapidwright.rapidsa.components.ReluTile;
@@ -881,7 +882,30 @@ public class RapidSANetlistBuilder {
                                                           int prevSaNCols,
                                                           String nextSaPrefix, int nextSaNRows,
                                                           int nextSaNCols) {
+        return attachReluBetweenSAs(design, precompileDir, prevSaPrefix, prevSaNRows,
+                prevSaNCols, nextSaPrefix, nextSaNRows, nextSaNCols, false);
+    }
+
+    public static List<EDIFCellInst> attachReluBetweenSAsWithBufferCrossings(Design design,
+                                                                             String precompileDir,
+                                                                             String prevSaPrefix,
+                                                                             int prevSaNRows,
+                                                                             int prevSaNCols,
+                                                                             String nextSaPrefix,
+                                                                             int nextSaNRows,
+                                                                             int nextSaNCols) {
+        return attachReluBetweenSAs(design, precompileDir, prevSaPrefix, prevSaNRows,
+                prevSaNCols, nextSaPrefix, nextSaNRows, nextSaNCols, true);
+    }
+
+    private static List<EDIFCellInst> attachReluBetweenSAs(Design design, String precompileDir,
+                                                           String prevSaPrefix, int prevSaNRows,
+                                                           int prevSaNCols,
+                                                           String nextSaPrefix, int nextSaNRows,
+                                                           int nextSaNCols,
+                                                           boolean insertBufferCrossings) {
         ReluTile reluComponent = new ReluTile(4, 8);
+        BufferTile bufferComponent = new BufferTile(4, 8);
         EDIFNetlist netlist = design.getNetlist();
         EDIFCell topCell = netlist.getTopCell();
 
@@ -892,6 +916,18 @@ public class RapidSANetlistBuilder {
             reluCell = loadComponentCell(precompileDir, reluComponent);
             netlist.migrateCellAndSubCells(reluCell, true);
             reluCell.makePrimitive();
+        }
+
+        EDIFCell bufferCrossingCell = null;
+        if (insertBufferCrossings) {
+            String bufferCrossingDcp = precompileDir + File.separator
+                    + bufferComponent.getComponentName() + File.separator
+                    + RapidSAPrecompile.SLR_CROSSING_RUN_DIR + File.separator
+                    + RapidSAPrecompile.SLR_CROSSING_SYNTH_DCP_NAME;
+            bufferCrossingCell = Design.readCheckpoint(bufferCrossingDcp).getTopEDIFCell();
+            netlist.migrateCellAndSubCells(bufferCrossingCell, true);
+            bufferCrossingCell = findCellInNetlist(netlist, bufferCrossingCell.getName());
+            bufferCrossingCell.makePrimitive();
         }
 
         EDIFNet clkNet = requireNet(topCell, "clk");
@@ -943,6 +979,12 @@ public class RapidSANetlistBuilder {
             String reluInstName = namePrefix + rIdx;
             EDIFCellInst reluInst = createBlackBox(topCell, reluInstName, reluCell);
             reluInsts.add(reluInst);
+            EDIFCellInst bufferInst = null;
+            String bufferInstName = prevName + "_to_" + nextName + "_buf_x" + rIdx;
+            if (insertBufferCrossings) {
+                bufferInst = createBlackBox(topCell, bufferInstName, bufferCrossingCell);
+                clkNet.createPortInst(bufferComponent.getClkName(), bufferInst);
+            }
 
             clkNet.createPortInst(reluComponent.getClkName(), reluInst);
             rstNNet.createPortInst(reluComponent.getResetName(), reluInst);
@@ -975,17 +1017,34 @@ public class RapidSANetlistBuilder {
 
                 // Destination bus: ReluTile.data_out[k] -> next north_inputs[nextNorthK]
                 for (int b = 0; b < dataBits; b++) {
-                    EDIFNet net = topCell.createNet(
-                            reluInstName + "_data_out_" + k + "_" + b);
-                    net.createPortInst("data_out[" + k + "][" + b + "]", reluInst);
-                    claimPortInst(net,
-                            GEMM_NORTH_INPUTS + "[" + nextNorthK + "][" + b + "]",
-                            nextTile);
+                    if (insertBufferCrossings) {
+                        EDIFNet topNet = topCell.createNet(
+                                bufferInstName + "_top_in_" + k + "_" + b);
+                        topNet.createPortInst("data_out[" + k + "][" + b + "]", reluInst);
+                        topNet.createPortInst(RapidSAPrecompile.SLR_CROSSING_TOP_INST_NAME
+                                + "_top_in[" + k + "][" + b + "]", bufferInst);
+
+                        EDIFNet bottomNet = topCell.createNet(
+                                bufferInstName + "_bot_out_" + k + "_" + b);
+                        bottomNet.createPortInst(RapidSAPrecompile.SLR_CROSSING_BOTTOM_INST_NAME
+                                + "_bot_out[" + k + "][" + b + "]", bufferInst);
+                        claimPortInst(bottomNet,
+                                GEMM_NORTH_INPUTS + "[" + nextNorthK + "][" + b + "]",
+                                nextTile);
+                    } else {
+                        EDIFNet net = topCell.createNet(
+                                reluInstName + "_data_out_" + k + "_" + b);
+                        net.createPortInst("data_out[" + k + "][" + b + "]", reluInst);
+                        claimPortInst(net,
+                                GEMM_NORTH_INPUTS + "[" + nextNorthK + "][" + b + "]",
+                                nextTile);
+                    }
                 }
             }
 
-            // ReluTile data_out_valid drives all next-tile north_inputs_valid bits
-            // for this ReluTile's slice of lanes.
+            // ReluTile data_out_valid drives all lanes in this slice. When a
+            // BufferTile crossing is inserted, each lane's registered valid
+            // output drives the corresponding next-tile valid input.
             EDIFNet validNet = topCell.createNet(reluInstName + "_data_out_valid");
             validNet.createPortInst("data_out_valid", reluInst);
             for (int k = 0; k < reluLanes; k++) {
@@ -994,8 +1053,19 @@ public class RapidSANetlistBuilder {
                 int nextNorthK = globalLane % numUnitsNorth;
                 EDIFCellInst nextTile = requireCellInst(topCell,
                         nextSaPrefix + "tile_x" + nextC + "y0");
-                claimPortInst(validNet,
-                        GEMM_NORTH_INPUTS_VALID + "[" + nextNorthK + "]", nextTile);
+                if (insertBufferCrossings) {
+                    validNet.createPortInst(RapidSAPrecompile.SLR_CROSSING_TOP_INST_NAME
+                            + "_top_in_valid[" + k + "]", bufferInst);
+                    EDIFNet bottomValidNet = topCell.createNet(
+                            bufferInstName + "_bot_out_valid_" + k);
+                    bottomValidNet.createPortInst(RapidSAPrecompile.SLR_CROSSING_BOTTOM_INST_NAME
+                            + "_bot_out_valid[" + k + "]", bufferInst);
+                    claimPortInst(bottomValidNet,
+                            GEMM_NORTH_INPUTS_VALID + "[" + nextNorthK + "]", nextTile);
+                } else {
+                    claimPortInst(validNet,
+                            GEMM_NORTH_INPUTS_VALID + "[" + nextNorthK + "]", nextTile);
+                }
             }
         }
 
@@ -1134,6 +1204,81 @@ public class RapidSANetlistBuilder {
     private static String stripTrailingUnderscore(String s) {
         if (s != null && s.endsWith("_")) return s.substring(0, s.length() - 1);
         return s;
+    }
+
+    /**
+     * Test-mode helper: ties to GND every input port that would normally be
+     * driven by this SA's MM2S (and, when {@code hasDrain}, its drains'
+     * fifo_wr_en plus s2mm.s2mm_start). Use after building a multi-SA
+     * netlist with one SA's MM2S omitted, so the design passes Vivado's
+     * driverless-net DRC.
+     */
+    public static void tieOffSAControlPins(Design design, String saPrefix,
+                                           int nRows, int nCols,
+                                           boolean hasInputEB, boolean hasDrain) {
+        EDIFCell topCell = design.getNetlist().getTopCell();
+        EDIFNet gndNet = EDIFTools.getStaticNet(NetType.GND, topCell, design.getNetlist());
+
+        // accum_shift on every GEMM in this SA.
+        for (int r = 0; r < nRows; r++) {
+            for (int c = 0; c < nCols; c++) {
+                EDIFCellInst tile = requireCellInst(topCell, saPrefix + "tile_x" + c + "y" + r);
+                claimPortInst(gndNet, GEMM_ACCUM_SHIFT, tile);
+            }
+        }
+
+        // Weight EB chain root: s_data, s_valid, s_word_index, rd_en.
+        String weightEbRootName = hasInputEB
+                ? (saPrefix + "weight_eb_x0")
+                : (saPrefix + "weight_eb_y0");
+        EDIFCellInst weightEbRoot = requireCellInst(topCell, weightEbRootName);
+        int weightEbDataWidth = getPortWidth(weightEbRoot.getCellType(), EB_S_DATA);
+        for (int i = 0; i < weightEbDataWidth; i++) {
+            claimPortInst(gndNet, EB_S_DATA + "[" + i + "]", weightEbRoot);
+        }
+        claimPortInst(gndNet, EB_S_VALID, weightEbRoot);
+        for (int b = 0; b < 4; b++) {
+            claimPortInst(gndNet, EB_S_WORD_INDEX + "[" + b + "]", weightEbRoot);
+        }
+        claimPortInst(gndNet, EB_RD_EN, weightEbRoot);
+
+        // Input EB chain root (if present).
+        if (hasInputEB) {
+            EDIFCellInst inputEbRoot = requireCellInst(topCell, saPrefix + "input_eb_y0");
+            int inputEbDataWidth = getPortWidth(inputEbRoot.getCellType(), EB_S_DATA);
+            for (int i = 0; i < inputEbDataWidth; i++) {
+                claimPortInst(gndNet, EB_S_DATA + "[" + i + "]", inputEbRoot);
+            }
+            claimPortInst(gndNet, EB_S_VALID, inputEbRoot);
+            for (int b = 0; b < 4; b++) {
+                claimPortInst(gndNet, EB_S_WORD_INDEX + "[" + b + "]", inputEbRoot);
+            }
+            claimPortInst(gndNet, EB_RD_EN, inputEbRoot);
+        }
+
+        // Drain fifo_wr_en on every drain (last SA only).
+        if (hasDrain) {
+            EDIFCellInst firstDrain = requireCellInst(topCell, saPrefix + "drain_x0");
+            int accumCount = getPortWidth(firstDrain.getCellType(), DRAIN_FIFO_WR_EN);
+            for (int c = 0; c < nCols; c++) {
+                EDIFCellInst drain = requireCellInst(topCell, saPrefix + "drain_x" + c);
+                for (int k = 0; k < accumCount; k++) {
+                    claimPortInst(gndNet, DRAIN_FIFO_WR_EN + "[" + k + "]", drain);
+                }
+            }
+        }
+    }
+
+    /**
+     * Test-mode helper: ties s2mm's s2mm_start input to GND when no MM2S
+     * is wired to it. (s2mm.s2mm_done is an output and can be left
+     * dangling.)
+     */
+    public static void tieOffS2MMHandshake(Design design, String s2mmInstanceName) {
+        EDIFCell topCell = design.getNetlist().getTopCell();
+        EDIFNet gndNet = EDIFTools.getStaticNet(NetType.GND, topCell, design.getNetlist());
+        EDIFCellInst s2mmInst = requireCellInst(topCell, s2mmInstanceName);
+        claimPortInst(gndNet, S2MM_START, s2mmInst);
     }
 
     public static void connectIngressEgressChannelHandshake(Design design, String ingressInstanceName,

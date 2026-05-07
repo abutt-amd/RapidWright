@@ -25,7 +25,6 @@ package com.xilinx.rapidwright.rapidsa;
 
 import com.xilinx.rapidwright.design.Cell;
 import com.xilinx.rapidwright.design.Design;
-import com.xilinx.rapidwright.design.DesignTools;
 import com.xilinx.rapidwright.design.Module;
 import com.xilinx.rapidwright.design.ModuleInst;
 import com.xilinx.rapidwright.design.Net;
@@ -52,6 +51,7 @@ import com.xilinx.rapidwright.edif.EDIFTools;
 import com.xilinx.rapidwright.rapidsa.components.DrainTile;
 import com.xilinx.rapidwright.rapidsa.components.EdgeBufferTile;
 import com.xilinx.rapidwright.rapidsa.components.GEMMTile;
+import com.xilinx.rapidwright.rapidsa.components.BufferTile;
 import com.xilinx.rapidwright.rapidsa.components.MM2SNOCChannel;
 import com.xilinx.rapidwright.rapidsa.components.RapidComponent;
 import com.xilinx.rapidwright.rapidsa.components.S2MMNOCChannel;
@@ -75,6 +75,8 @@ import java.util.TreeMap;
 public class RapidSA {
     private static final int ID_WIDTH = 8;
     private static final int DCU_UNITS_PER_TILE = 4;
+    private static final int MULTI_SA_BASE_ROW_OFFSET = 5;
+    private static final int MULTI_SA_DOWNSTREAM_ROW_OFFSET = 40;
 
     public static void main(String[] args) {
         String partName = "xcv80-lsva4737-2MHP-e-S";
@@ -93,6 +95,7 @@ public class RapidSA {
         parser.accepts("handshake-chain-depth", "Flop chain depth for s2mm_start/s2mm_done handshake nets that span the full array (default: scales with nRows)").withRequiredArg().ofType(Integer.class);
         parser.accepts("accel-json", "Path to accel.json from pytorch-bridge; selects multi-SA flow").withRequiredArg();
         parser.accepts("out-dcp", "Output DCP path for --accel-json multi-SA flow").withRequiredArg().defaultsTo("multi_sa.dcp");
+        parser.accepts("single-mm2s", "Test: attach/place only SA[0]'s MM2S (skip MM2S for SAs[1..]); their weight EB chain s_data inputs are left dangling.");
         parser.accepts("help", "Print help message");
         joptsimple.OptionSet options = parser.parse(args);
 
@@ -561,11 +564,22 @@ public class RapidSA {
                                                  Design targetDesign) {
         String dcpPath = precompileDir + File.separator
                 + component.getComponentName() + File.separator + "pnr.dcp";
+        return loadRelocatableModuleFromDcp(dcpPath, component.getComponentName(), component.getClkName(),
+                targetDesign);
+    }
+
+    private static Module loadRelocatableModuleFromDcp(String dcpPath, String label, String clkName,
+                                                       Design targetDesign) {
+        return loadRelocatableModuleFromDcp(dcpPath, label, clkName, targetDesign, true);
+    }
+
+    private static Module loadRelocatableModuleFromDcp(String dcpPath, String label, String clkName,
+                                                       Design targetDesign, boolean removeLockedSiteInsts) {
         Design pnrDesign = Design.readCheckpoint(dcpPath);
         EDIFTools.removeVivadoBusPreventionAnnotations(pnrDesign.getNetlist());
 
         ArrayBuilder.removeBUFGs(pnrDesign);
-        Net clkNet = pnrDesign.getNet(component.getClkName());
+        Net clkNet = pnrDesign.getNet(clkName);
         if (clkNet != null) {
             clkNet.unroute();
         }
@@ -579,22 +593,24 @@ public class RapidSA {
                 staticSourceCount++;
                 continue;
             }
-            boolean allLocked = !si.getCells().isEmpty();
-            for (Cell c : si.getCells()) {
-                if (!c.getName().equals("<LOCKED>")) {
-                    allLocked = false;
-                    break;
+            if (removeLockedSiteInsts) {
+                boolean allLocked = !si.getCells().isEmpty();
+                for (Cell c : si.getCells()) {
+                    if (!c.getName().equals("<LOCKED>")) {
+                        allLocked = false;
+                        break;
+                    }
                 }
-            }
-            if (allLocked) {
-                toRemove.add(si);
-                allLockedCount++;
+                if (allLocked) {
+                    toRemove.add(si);
+                    allLockedCount++;
+                }
             }
         }
         for (SiteInst si : toRemove) {
             pnrDesign.removeSiteInst(si);
         }
-        System.out.println("** loadRelocatableModule[" + component.getComponentName()
+        System.out.println("** loadRelocatableModule[" + label
                 + "]: removed " + staticSourceCount + " STATIC_SOURCE SiteInsts, "
                 + allLockedCount + " all-<LOCKED> SiteInsts (total SiteInsts before removal: "
                 + (pnrDesign.getSiteInsts().size() + toRemove.size()) + ")");
@@ -1165,6 +1181,10 @@ public class RapidSA {
         String jsonPath = (String) options.valueOf("accel-json");
         String outDcp = (String) options.valueOf("out-dcp");
         String precompileDir = "RapidSA";
+        boolean singleMM2S = options.has("single-mm2s");
+        if (singleMM2S) {
+            System.out.println("** --single-mm2s: only SA[0] gets a MM2S; SAs[1..] weight EB roots will dangle.");
+        }
 
         AccelConfig cfg = AccelConfig.parse(Paths.get(jsonPath));
         List<AccelConfig.LinearLayer> linears = cfg.getLinearLayers();
@@ -1189,11 +1209,18 @@ public class RapidSA {
         CodePerfTracker t = new CodePerfTracker(RapidSA.class.getName() + ".multiSA");
         t.start("Build netlist");
 
-        // 1. Combined netlist (sa{i}_ prefixed instances, ReluTile bridges,
-        //    per-SA MM2S, single S2MM on last SA).
+        // 1. Combined netlist with sa{i}_ prefixed segments. Only the GEMM
+        //    tiles, EB chains, and drain chain instances exist at this stage
+        //    — the MM2S, S2MM, and ReluTile black boxes are NOT created
+        //    yet. They get attached after the per-SA createArray passes
+        //    below, so the encrypted-IP s2mm/mm2s wrappers are only seen by
+        //    flattenDesign() once (the final flatten) instead of once per
+        //    createArray. With the earlier "attach first" ordering, multiple
+        //    flattens over the still-unplaced encrypted-IP black boxes left
+        //    thousands of internal IP leaf cells unmaterialized after the
+        //    final mi.place().
         Design design = RapidSANetlistBuilder.createMultiSANetlist(
                 linears, partName, precompileDir);
-        attachAllMM2SAndReluAndS2MM(design, precompileDir, linears);
 
         // 2. Load the kernel Design and the peripheral Modules (one each,
         //    shared across all SAs — RapidWright's ModuleImpls requires
@@ -1209,15 +1236,14 @@ public class RapidSA {
         String kernelDcp = precompileDir + File.separator
                 + gemm44.getComponentName() + File.separator + "pnr.dcp";
 
-        Module weightEbModule = loadRelocatableModule(precompileDir, weightEbComp, design);
-        Module inputEbModule = loadRelocatableModule(precompileDir, inputEbComp, design);
-        Module drainModule = loadRelocatableModule(precompileDir, drainComp, design);
-        Module mm2sModule = loadRelocatableModule(precompileDir,
-                new com.xilinx.rapidwright.rapidsa.components.MM2SNOCChannel(), design);
-        Module s2mmModule = loadRelocatableModule(precompileDir,
-                new com.xilinx.rapidwright.rapidsa.components.S2MMNOCChannel(), design);
-        Module reluModule = loadRelocatableModule(precompileDir,
-                new com.xilinx.rapidwright.rapidsa.components.ReluTile(4, 8), design);
+        // EB/Drain/MM2S/S2MM/ReluTile Modules are loaded JUST BEFORE the
+        // first placement that uses each, mirroring direct-flow's load-then-
+        // place pattern. Loading them upfront (before createArray) was
+        // dropping ~2k ROUTETHRU cells from placed SiteInsts, which is what
+        // produced the "X sites failed to restore" XDEF error in Vivado.
+        Module[] weightEbModuleHolder = new Module[1];
+        Module[] inputEbModuleHolder = new Module[1];
+        Module[] drainModuleHolder = new Module[1];
 
         // 3. Phase 1: per-SA ArrayBuilder.createArray() in order. Each call
         //    flattens the design — doing them all up-front means peripheral
@@ -1248,7 +1274,7 @@ public class RapidSA {
             saConfig.setOutOfContext(false);
             saConfig.setRouteClock(false);
             saConfig.setFlipPlacementHorizontally(true);
-            saConfig.setRowOffset(5);
+            saConfig.setRowOffset(i == 0 ? MULTI_SA_BASE_ROW_OFFSET : MULTI_SA_DOWNSTREAM_ROW_OFFSET);
             saConfig.setColumnOffset(1);
             saConfig.setTargetSLR(targetSlr);
             saConfig.setInstanceNamePrefix(prefix);
@@ -1265,9 +1291,14 @@ public class RapidSA {
                     + ", cols " + bounds.leftCol + ".." + bounds.rightCol);
         }
 
-        // 4. Phase 2: peripheral placement for every SA. No more flattens here —
-        //    every Module-instance placement persists into the final DCP.
-        t.stop().start("Place peripherals");
+        // 4. Phase 2a: place EBs and Drains FIRST, while their netlist black
+        //    boxes are still untouched by any attach* call. This mirrors the
+        //    direct single-SA flow's order (place EB/Drain -> attach MM2S
+        //    -> place MM2S). Placing a Module whose corresponding black box
+        //    already has port-insts wired to nets (from a prior attach*)
+        //    leaves the resulting SiteInsts in a state that fails
+        //    XDEF-restore in Vivado later.
+        t.stop().start("Place EBs and Drains");
         for (int i = 0; i < linears.size(); i++) {
             AccelConfig.LinearLayer layer = linears.get(i);
             int nRows = RapidSANetlistBuilder.effectiveNRows(layer, i);
@@ -1280,48 +1311,133 @@ public class RapidSA {
             ArrayBounds bounds = perSaBounds.get(i);
 
             if (!isRotated) {
-                placeWeightEBsAboveForSA(ab, prefix, nCols, weightEbModule,
+                if (weightEbModuleHolder[0] == null)
+                    weightEbModuleHolder[0] = loadRelocatableModule(precompileDir, weightEbComp, design);
+                placeWeightEBsAboveForSA(ab, prefix, nCols, weightEbModuleHolder[0],
                         bounds, globalNoGo);
             } else {
-                // Rotated SAs: the netlist instantiates the InputEdgeBuffer
-                // precompile (see buildArraySegment). Use the InputEB Module
-                // for placement so the relocation matches the cell type.
-                placeWeightEBsRightForSA(ab, prefix, nRows, inputEbModule,
+                // Rotated SAs: netlist uses the InputEdgeBuffer precompile
+                // (see buildArraySegment). Use the InputEB Module for
+                // placement so the relocation matches the cell type.
+                if (inputEbModuleHolder[0] == null)
+                    inputEbModuleHolder[0] = loadRelocatableModule(precompileDir, inputEbComp, design);
+                placeWeightEBsRightForSA(ab, prefix, nRows, inputEbModuleHolder[0],
                         bounds, globalNoGo);
             }
             if (hasInputEB) {
-                placeInputEBsRightForSA(ab, prefix, nRows, inputEbModule,
+                if (inputEbModuleHolder[0] == null)
+                    inputEbModuleHolder[0] = loadRelocatableModule(precompileDir, inputEbComp, design);
+                placeInputEBsRightForSA(ab, prefix, nRows, inputEbModuleHolder[0],
                         bounds, globalNoGo);
             }
             if (hasDrain) {
-                placeDrainsBelowForSA(ab, prefix, nCols, drainModule,
+                if (drainModuleHolder[0] == null)
+                    drainModuleHolder[0] = loadRelocatableModule(precompileDir, drainComp, design);
+                placeDrainsBelowForSA(ab, prefix, nCols, drainModuleHolder[0],
                         bounds, globalNoGo);
             }
-            placeMM2SForSA(ab, prefix, mm2sModule, bounds, globalNoGo);
         }
 
-        // 5. ReluTile placement: stamped just below SA[i] (inside SA[i]'s SLR)
-        //    for each pair (i, i+1).
+        // 5. Phase 2b: now that EB/Drain ModuleInsts are placed, attach the
+        //    MM2S/S2MM/ReluTile black boxes and the netlist wiring. The
+        //    claimPortInst calls inside attach* now operate on materialized
+        //    SiteInst-backed cells (matching direct-flow behavior).
+        t.stop().start("Attach MM2S/S2MM/ReluTile netlist");
+        attachAllMM2SAndReluAndS2MM(design, precompileDir, linears, singleMM2S);
+
+        // Load MM2S/S2MM/ReluTile Modules ONLY AFTER attach* has migrated
+        // their synth cell types into the netlist. This ordering matches
+        // direct-flow exactly. Loading these Modules before attach means
+        // the pnr cell type gets registered first, then attach migrates
+        // the synth cell type, and the resulting cell-type state confuses
+        // Vivado's XDEF restore.
+        Module mm2sModule = loadRelocatableModule(precompileDir,
+                new com.xilinx.rapidwright.rapidsa.components.MM2SNOCChannel(), design);
+        Module s2mmModule = loadRelocatableModule(precompileDir,
+                new com.xilinx.rapidwright.rapidsa.components.S2MMNOCChannel(), design);
+        Module reluModule = loadRelocatableModule(precompileDir,
+                new com.xilinx.rapidwright.rapidsa.components.ReluTile(4, 8), design);
+        BufferTile bufferTile = new BufferTile(4, 8);
+        String bufferSlrCrossingDcp = precompileDir + File.separator
+                + bufferTile.getComponentName() + File.separator
+                + RapidSAPrecompile.SLR_CROSSING_RUN_DIR + File.separator
+                + RapidSAPrecompile.SLR_CROSSING_DCP_NAME;
+        Module bufferSlrCrossingModule = loadRelocatableModuleFromDcp(bufferSlrCrossingDcp,
+                bufferTile.getComponentName() + "." + RapidSAPrecompile.SLR_CROSSING_RUN_DIR,
+                bufferTile.getClkName(), design, false);
+
+        // 6. Phase 2c: place the now-attached MM2S/ReluTile/S2MM ModuleInsts.
+        t.stop().start("Place MM2S/S2MM/ReluTile");
+        for (int i = 0; i < linears.size(); i++) {
+            String prefix = "sa" + i + "_";
+            ArrayBuilder ab = perSaBuilders.get(i);
+            ArrayBounds bounds = perSaBounds.get(i);
+            // Skip MM2S placement when --single-mm2s and this isn't SA[0].
+            if (!singleMM2S || i == 0) {
+                placeMM2SForSA(ab, prefix, mm2sModule, bounds, globalNoGo);
+            }
+        }
         for (int i = 0; i + 1 < linears.size(); i++) {
             AccelConfig.LinearLayer prev = linears.get(i);
             int prevNCols = RapidSANetlistBuilder.effectiveNCols(prev, i);
             placeReluTilesBetweenSAs(perSaBuilders.get(i), "sa" + i,
                     "sa" + (i + 1), prevNCols, reluModule,
                     perSaBounds.get(i), globalNoGo);
+            placeBufferSLRCrossingsBetweenSAs(perSaBuilders.get(i), "sa" + i,
+                    "sa" + (i + 1), prevNCols, bufferSlrCrossingModule,
+                    perSaBounds.get(i + 1), globalNoGo);
         }
-
-        // 6. S2MM placement: bottom-right of last SA.
         placeS2MMForSA(perSaBuilders.get(last), "s2mm", s2mmModule,
                 perSaBounds.get(last), globalNoGo);
 
         t.stop().start("Finalize");
 
-        // 6. Flatten & finalize.
+        // 7. Flatten & finalize.
         design.flattenDesign();
         EDIFTools.uniqueifyNetlist(design);
-        DesignTools.createMissingSitePinInsts(design);
+        // Do not run DesignTools.createMissingSitePinInsts(design) globally
+        // here. The NOC channel modules contain encrypted IP: their physical
+        // cells are visible, but their logical leaf netlists are intentionally
+        // opaque. A global missing-pin inference pass can fabricate boundary
+        // pins on encrypted internal nets and Vivado then reports unplaced
+        // cells/pins under s2mm when restoring the XDEF. The direct single-SA
+        // flow also avoids the global pass; FlopTreeTools creates and routes
+        // the pins it needs for inserted control flops below.
+
+        // 8. Insert flop trees on each SA's per-SA scoped control nets, then
+        //    routeSite() on the touched SiteInsts. This is the same pattern
+        //    direct-flow uses; without it, intra-site IMR ROUTETHRU cells
+        //    aren't materialized and Vivado's XDEF restore fails on hundreds
+        //    of array sites.
+        int totalSinks = 0;
+        for (AccelConfig.LinearLayer l : linears) {
+            int er = RapidSANetlistBuilder.effectiveNRows(l, 0); // for a per-SA estimate
+            int ec = RapidSANetlistBuilder.effectiveNCols(l, 0);
+            totalSinks = Math.max(totalSinks, er * ec);
+        }
+        int defaultMaxDepthPerSLR = Math.max(2,
+                (int) Math.ceil(Math.log(Math.max(1, totalSinks)) / Math.log(4)));
+        int chainSlack = 3;
+        int defaultFlopTreeDepth = defaultMaxDepthPerSLR + 2 + chainSlack;
+        for (int i = 0; i < linears.size(); i++) {
+            String prefix = "sa" + i + "_";
+            for (String netName : new String[]{prefix + "sa_accum_shift", prefix + "output_wr_en"}) {
+                if (design.getNetlist().getTopCell().getNet(netName) == null) continue;
+                if (design.getNet(netName) == null) {
+                    // Wrap the existing EDIF net with a physical Net so
+                    // FlopTreeTools can operate on it. Direct-flow's nets
+                    // get a physical Net created elsewhere; multi-flow's
+                    // prefixed nets don't, hence this explicit step.
+                    design.createNet(netName);
+                }
+                System.out.println("[multi-finalize] FlopTree on " + netName);
+                FlopTreeTools.insertFlopTreeForNet(design, netName, "clk",
+                        defaultFlopTreeDepth, defaultMaxDepthPerSLR, globalNoGo);
+            }
+        }
+
         insertTopLevelBUFGCE(design);
-        design.addXDCConstraint("create_clock -period 4.0 -name clk [get_ports clk_in]");
+        design.addXDCConstraint("create_clock -period 2.0 -name clk [get_ports clk_in]");
         design.setDesignOutOfContext(true);
 
         design.writeCheckpoint(outDcp);
@@ -1333,9 +1449,12 @@ public class RapidSA {
 
     /** Wires per-SA MM2S, ReluTile bridges, and the single S2MM into the netlist. */
     private static void attachAllMM2SAndReluAndS2MM(Design design, String precompileDir,
-                                                    List<AccelConfig.LinearLayer> linears) {
+                                                    List<AccelConfig.LinearLayer> linears,
+                                                    boolean singleMM2S) {
         int last = linears.size() - 1;
         for (int i = 0; i < linears.size(); i++) {
+            // Test mode: only attach SA[0]'s MM2S.
+            if (singleMM2S && i != 0) continue;
             AccelConfig.LinearLayer l = linears.get(i);
             String prefix = "sa" + i + "_";
             boolean hasInputEB = (i == 0);
@@ -1352,14 +1471,34 @@ public class RapidSA {
             int prevC = RapidSANetlistBuilder.effectiveNCols(prev, i);
             int nextR = RapidSANetlistBuilder.effectiveNRows(next, i + 1);
             int nextC = RapidSANetlistBuilder.effectiveNCols(next, i + 1);
-            RapidSANetlistBuilder.attachReluBetweenSAs(design, precompileDir,
+            RapidSANetlistBuilder.attachReluBetweenSAsWithBufferCrossings(design, precompileDir,
                     "sa" + i + "_", prevR, prevC,
                     "sa" + (i + 1) + "_", nextR, nextC);
         }
         RapidSANetlistBuilder.attachS2MMNOCChannel(design, precompileDir,
                 "s2mm", "sa" + last + "_drain_x0");
-        RapidSANetlistBuilder.connectIngressEgressChannelHandshake(design,
-                "sa" + last + "_mm2s", "s2mm");
+        // Handshake needs sa{last}_mm2s, which only exists in non-singleMM2S mode.
+        if (!singleMM2S || last == 0) {
+            RapidSANetlistBuilder.connectIngressEgressChannelHandshake(design,
+                    "sa" + last + "_mm2s", "s2mm");
+        } else {
+            // s2mm.s2mm_start would otherwise dangle.
+            RapidSANetlistBuilder.tieOffS2MMHandshake(design, "s2mm");
+        }
+        // Tie off every SA's MM2S-driven inputs that we skipped attaching.
+        if (singleMM2S) {
+            for (int i = 0; i < linears.size(); i++) {
+                if (i == 0) continue;
+                AccelConfig.LinearLayer l = linears.get(i);
+                int nRows = RapidSANetlistBuilder.effectiveNRows(l, i);
+                int nCols = RapidSANetlistBuilder.effectiveNCols(l, i);
+                String prefix = "sa" + i + "_";
+                boolean hasInputEB = (i == 0); // false here since i>0
+                boolean hasDrain = (i == last);
+                RapidSANetlistBuilder.tieOffSAControlPins(design, prefix,
+                        nRows, nCols, hasInputEB, hasDrain);
+            }
+        }
     }
 
     // ----- Per-SA placement helpers (multi-SA flow only) -----
@@ -1475,33 +1614,62 @@ public class RapidSA {
         }
     }
 
-    /** Places nRows InputEBs to the RIGHT of this SA (standard SA[0] only). */
+    /**
+     * Places nRows InputEBs to the RIGHT of this SA (standard SA[0] only).
+     * Uses the MODULE CENTROID for Manhattan-distance scoring (anchor +
+     * (bbCenter - anchor) row offset), matching direct-flow's
+     * placeInputDCUTiles. The InputEB module's anchor sits at one edge of
+     * its bbox, so anchor-based distance picks an anchor whose centroid is
+     * shifted ~half-bbox-height from the target — leading to placements
+     * different from direct-flow's. The centroid-based distance fixes that.
+     */
     private static void placeInputEBsRightForSA(ArrayBuilder ab, String prefix, int nRows,
                                                  Module inputEbModule, ArrayBounds bounds,
                                                  List<RelocatableTileRectangle> globalNoGo) {
         Design arrayDesign = ab.getArray();
         Map<Pair<Integer, Integer>, Site> centroids = ab.getLogicalToCentroidMap();
         int slrId = centroids.values().iterator().next().getTile().getSLR().getId();
-        // Find rightmost column index from centroids
         int nCols = 0;
         for (Pair<Integer, Integer> k : centroids.keySet())
             nCols = Math.max(nCols, k.getFirst() + 1);
+
+        RelocatableTileRectangle moduleBb = inputEbModule.getBoundingBox();
+        int anchorRow = inputEbModule.getAnchor().getTile().getRow();
+        int bbCenterRow = (moduleBb.getMinRow() + moduleBb.getMaxRow()) / 2;
+        int anchorToCentroidRowOffset = bbCenterRow - anchorRow;
+        final int arrayRightCol = bounds.rightCol;
+
         for (int row = 0; row < nRows; row++) {
             Site target = centroids.get(new Pair<>(nCols - 1, row));
+            Tile targetTile = target.getTile();
             String instName = prefix + "input_eb_y" + row;
             ModuleInst mi = arrayDesign.createModuleInst(instName, inputEbModule);
-            final int arrayRightCol = bounds.rightCol;
-            Site anchor = findBestAnchor(inputEbModule, target, slrId, globalNoGo,
-                    java.util.Collections.emptySet(),
-                    bb -> bb.getMinColumn() > arrayRightCol);
-            if (anchor == null) {
+
+            Site bestAnchor = null;
+            int bestDist = Integer.MAX_VALUE;
+            for (Site anchor : inputEbModule.getAllValidPlacements()) {
+                if (anchor.getTile().getSLR().getId() != slrId) continue;
+                RelocatableTileRectangle candBb = moduleBb
+                        .getCorresponding(anchor.getTile(), inputEbModule.getAnchor().getTile());
+                if (candBb.getMinColumn() <= arrayRightCol) continue;
+                boolean overlaps = false;
+                for (RelocatableTileRectangle existing : globalNoGo) {
+                    if (existing.overlaps(candBb)) { overlaps = true; break; }
+                }
+                if (overlaps) continue;
+                int moduleCentroidRow = anchor.getTile().getRow() + anchorToCentroidRowOffset;
+                int dist = Math.abs(anchor.getTile().getColumn() - targetTile.getColumn())
+                         + Math.abs(moduleCentroidRow - targetTile.getRow());
+                if (dist < bestDist) { bestDist = dist; bestAnchor = anchor; }
+            }
+            if (bestAnchor == null) {
                 throw new RuntimeException("No placement for " + instName + " (SLR " + slrId + ")");
             }
-            if (!mi.place(anchor, false, false)) {
-                throw new RuntimeException("Failed to place " + instName + " at " + anchor);
+            if (!mi.place(bestAnchor, false, false)) {
+                throw new RuntimeException("Failed to place " + instName + " at " + bestAnchor);
             }
-            recordPlacementBbox(anchor, inputEbModule, globalNoGo);
-            System.out.println("  ** PLACED InputEB: " + instName + " at " + anchor);
+            recordPlacementBbox(bestAnchor, inputEbModule, globalNoGo);
+            System.out.println("  ** PLACED InputEB: " + instName + " at " + bestAnchor);
         }
     }
 
@@ -1589,6 +1757,89 @@ public class RapidSA {
         }
         recordPlacementBbox(anchor, s2mmModule, globalNoGo);
         System.out.println("  ** PLACED S2MM: " + instName + " at " + anchor);
+    }
+
+    /**
+     * Places one BufferTile SLR-crossing wrapper per ReluTile between two
+     * adjacent SAs. The wrapper's top half lives in {@code prevAb}'s SLR and
+     * its bottom half lives in the next SLR, matching the ReluTile ->
+     * BufferTile -> next-SA netlist wiring.
+     */
+    private static void placeBufferSLRCrossingsBetweenSAs(ArrayBuilder prevAb, String prevName,
+                                                           String nextName, int count,
+                                                           Module bufferSlrCrossingModule,
+                                                           ArrayBounds nextBounds,
+                                                           List<RelocatableTileRectangle> globalNoGo) {
+        Design arrayDesign = prevAb.getArray();
+        int slrId = prevAb.getLogicalToCentroidMap().values().iterator().next()
+                .getTile().getSLR().getId();
+        Map<SLR, List<Site>> validCrossings = ArrayBuilder.getValidSLRCrossings(bufferSlrCrossingModule);
+        List<Site> candidateAnchors = null;
+        for (Map.Entry<SLR, List<Site>> e : validCrossings.entrySet()) {
+            if (e.getKey().getId() == slrId) {
+                candidateAnchors = e.getValue();
+                break;
+            }
+        }
+        if (candidateAnchors == null || candidateAnchors.isEmpty()) {
+            throw new RuntimeException("No BufferTile SLR-crossing placements for SLR " + slrId);
+        }
+
+        Map<Pair<Integer, Integer>, Site> centroids = prevAb.getLogicalToCentroidMap();
+        int prevNRows = 0;
+        for (Pair<Integer, Integer> k : centroids.keySet()) {
+            prevNRows = Math.max(prevNRows, k.getSecond() + 1);
+        }
+
+        RelocatableTileRectangle moduleBb = bufferSlrCrossingModule.getBoundingBox();
+        for (int idx = 0; idx < count; idx++) {
+            Site target = centroids.get(new Pair<>(idx, prevNRows - 1));
+            Tile targetTile = target.getTile();
+            String instName = prevName + "_to_" + nextName + "_buf_x" + idx;
+            ModuleInst mi = arrayDesign.createModuleInst(instName, bufferSlrCrossingModule);
+
+            List<Pair<Integer, Site>> viableAnchors = new ArrayList<>();
+            for (Site anchor : candidateAnchors) {
+                RelocatableTileRectangle candBb = moduleBb
+                        .getCorresponding(anchor.getTile(), bufferSlrCrossingModule.getAnchor().getTile());
+                boolean overlaps = false;
+                for (RelocatableTileRectangle existing : globalNoGo) {
+                    if (existing.overlaps(candBb)) {
+                        overlaps = true;
+                        break;
+                    }
+                }
+                if (overlaps) continue;
+                if (candBb.getMaxRow() >= nextBounds.topRow) {
+                    continue;
+                }
+
+                int dist = Math.abs(anchor.getTile().getColumn() - targetTile.getColumn())
+                         + Math.abs(anchor.getTile().getRow() - targetTile.getRow());
+                viableAnchors.add(new Pair<>(dist, anchor));
+            }
+            viableAnchors.sort(java.util.Comparator.comparingInt(Pair::getFirst));
+
+            Site bestAnchor = null;
+            for (Pair<Integer, Site> candidate : viableAnchors) {
+                Site anchor = candidate.getSecond();
+                if (mi.place(anchor, false, false)) {
+                    bestAnchor = anchor;
+                    break;
+                }
+                mi.unplace();
+            }
+            if (bestAnchor == null) {
+                throw new RuntimeException("No placement for " + instName + " (SLR " + slrId + ")");
+            }
+            recordPlacementBbox(bestAnchor, bufferSlrCrossingModule, globalNoGo);
+            RelocatableTileRectangle placedBb = moduleBb
+                    .getCorresponding(bestAnchor.getTile(), bufferSlrCrossingModule.getAnchor().getTile());
+            System.out.println("  ** PLACED BufferTile SLR Crossing: " + instName
+                    + " at " + bestAnchor
+                    + " bbox rows " + placedBb.getMinRow() + ".." + placedBb.getMaxRow()
+                    + " nextArrayTopRow=" + nextBounds.topRow);
+        }
     }
 
     /**

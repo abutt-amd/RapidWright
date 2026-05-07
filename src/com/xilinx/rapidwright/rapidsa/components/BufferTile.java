@@ -112,9 +112,7 @@ public class BufferTile implements RapidComponent {
     public Map<EDIFPort, PBlockSide> getSideMap(Design d) {
         List<String> lines = new ArrayList<>();
         lines.add("top_in.* TOP");
-        lines.add("top_in_valid.* TOP");
         lines.add("bot_out.* BOTTOM");
-        lines.add("bot_out_valid.* BOTTOM");
         return InlineFlopTools.parseSideMap(d.getNetlist(), lines);
     }
 

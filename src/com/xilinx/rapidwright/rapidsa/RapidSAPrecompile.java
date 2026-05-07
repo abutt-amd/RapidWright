@@ -37,8 +37,8 @@ import com.xilinx.rapidwright.edif.EDIFNet;
 import com.xilinx.rapidwright.edif.EDIFNetlist;
 import com.xilinx.rapidwright.edif.EDIFPort;
 import com.xilinx.rapidwright.edif.EDIFTools;
+import com.xilinx.rapidwright.rapidsa.components.BufferTile;
 import com.xilinx.rapidwright.rapidsa.components.RapidComponent;
-import com.xilinx.rapidwright.rapidsa.components.ReluTile;
 import com.xilinx.rapidwright.util.ArrayBuilderSLRCrossingCreator;
 import com.xilinx.rapidwright.util.FileTools;
 import com.xilinx.rapidwright.util.PerformanceExplorer;
@@ -98,7 +98,8 @@ public class RapidSAPrecompile {
 //                    new EdgeBufferTile(4, EdgeBufferTile.Type.WEIGHT),
 //                    new EdgeBufferTile(4, EdgeBufferTile.Type.INPUT),
 //                    new DrainTile(4, 16),
-                    new ReluTile(4, 8)
+//                    new ReluTile(4, 8)
+                    new BufferTile(4, 8)
 //                    new MM2SNOCChannel(),
 //                    new S2MMNOCChannel()
             )
