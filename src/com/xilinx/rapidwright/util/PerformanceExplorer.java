@@ -349,7 +349,7 @@ public class PerformanceExplorer {
         } else {
             lines.add("source " + encryptedTcl);
         }
-        lines.add("set_clock_uncertainty -setup "+clockUncertainty+" [get_clocks "+clkName+"]");
+        lines.add("# set_clock_uncertainty -setup "+clockUncertainty+" [get_clocks "+clkName+"]");
         if (pblock != null) {
             String pblockName = pblock.getName() == null ? "pe_pblock_1" : pblock.getName();
             lines.add("create_pblock " + pblockName);
@@ -368,8 +368,7 @@ public class PerformanceExplorer {
             lines.add("place_design -unplace");
         }
         lines.add("place_design -directive " + p.name());
-        lines.add("set_clock_uncertainty -setup "+baseClockUncertainty+" [get_clocks "+clkName+"]");
-        lines.add("set_clock_uncertainty -hold "+baseClockUncertainty+" [get_clocks "+clkName+"]");
+        lines.add("# set_clock_uncertainty -setup "+baseClockUncertainty+" [get_clocks "+clkName+"]");
         lines.add("report_timing -file "+instDirectory + File.separator+PLACED_TIMING_RESULT);
         lines.add("route_design -directive " + r.name());
         lines.add("report_timing -file "+instDirectory + File.separator+ROUTED_TIMING_RESULT);

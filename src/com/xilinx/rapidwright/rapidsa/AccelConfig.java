@@ -60,28 +60,33 @@ public class AccelConfig {
     public static final class LinearLayer extends Layer {
         public final int in;
         public final int out;
+        public final int batch;
         public final int tileIn;
         public final int tileOut;
+        public final int paddedBatch;
         public final int paddedTileIn;
         public final int paddedTileOut;
         public final boolean bias;
 
-        public LinearLayer(int in, int out, int tileIn, int tileOut,
+        public LinearLayer(int in, int out, int batch, int tileIn, int tileOut,
                            boolean bias, String dtype) {
             super(LayerKind.LINEAR, dtype);
             this.in = in;
             this.out = out;
+            this.batch = batch;
             this.tileIn = tileIn;
             this.tileOut = tileOut;
+            this.paddedBatch = roundUp(batch, GEMM_DIM);
             this.paddedTileIn = roundUp(tileIn, GEMM_DIM);
             this.paddedTileOut = roundUp(tileOut, GEMM_DIM);
             this.bias = bias;
         }
 
+        public int padBatch() { return paddedBatch - batch; }
         public int padIn()  { return paddedTileIn  - tileIn;  }
         public int padOut() { return paddedTileOut - tileOut; }
-        public int nRows()  { return paddedTileIn  / GEMM_DIM; }
-        public int nCols()  { return paddedTileOut / GEMM_DIM; }
+        public int nRows()  { return paddedTileOut / GEMM_DIM; }
+        public int nCols()  { return paddedBatch   / GEMM_DIM; }
     }
 
     public static final class ReluLayer extends Layer {
@@ -124,6 +129,7 @@ public class AccelConfig {
                     parsed.add(new LinearLayer(
                             obj.getInt("in"),
                             obj.getInt("out"),
+                            obj.getInt("batch"),
                             obj.getInt("tile_in"),
                             obj.getInt("tile_out"),
                             obj.getBoolean("bias"),
@@ -226,9 +232,11 @@ public class AccelConfig {
             if (l instanceof LinearLayer) {
                 LinearLayer ll = (LinearLayer) l;
                 System.out.printf(
-                        "  [%d] LINEAR  in=%d out=%d  tile_in=%d (padded %d, +%d) "
-                                + "tile_out=%d (padded %d, +%d)  nRows=%d nCols=%d  bias=%s%n",
+                        "  [%d] LINEAR  in=%d out=%d  batch=%d (padded %d, +%d) "
+                                + "tile_in=%d (padded %d, +%d) tile_out=%d (padded %d, +%d) "
+                                + "nRows=%d nCols=%d  bias=%s%n",
                         i, ll.in, ll.out,
+                        ll.batch, ll.paddedBatch, ll.padBatch(),
                         ll.tileIn, ll.paddedTileIn, ll.padIn(),
                         ll.tileOut, ll.paddedTileOut, ll.padOut(),
                         ll.nRows(), ll.nCols(), ll.bias);

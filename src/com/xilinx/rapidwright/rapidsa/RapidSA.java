@@ -96,6 +96,8 @@ public class RapidSA {
         parser.accepts("accel-json", "Path to accel.json from pytorch-bridge; selects multi-SA flow").withRequiredArg();
         parser.accepts("out-dcp", "Output DCP path for --accel-json multi-SA flow").withRequiredArg().defaultsTo("multi_sa.dcp");
         parser.accepts("single-mm2s", "Test: attach/place only SA[0]'s MM2S (skip MM2S for SAs[1..]); their weight EB chain s_data inputs are left dangling.");
+        parser.accepts("disable-global-control", "Test: tie off output_wr_en, accum_shift, and MM2S/S2MM handshake; skip global control flop trees/chains.");
+        parser.accepts("disable-hold-timing", "Test: add a design-level set_false_path -hold between all registers before route/timing.");
         parser.accepts("help", "Print help message");
         joptsimple.OptionSet options = parser.parse(args);
 
@@ -129,6 +131,15 @@ public class RapidSA {
 
         int nRows = (Integer) options.valueOf("rows");
         int nCols = (Integer) options.valueOf("cols");
+        boolean disableGlobalControl = options.has("disable-global-control");
+        boolean disableHoldTiming = options.has("disable-hold-timing");
+        if (disableGlobalControl) {
+            System.out.println("** --disable-global-control: tying off output_wr_en, accum_shift, "
+                    + "and MM2S/S2MM handshake; skipping control flop trees/chains.");
+        }
+        if (disableHoldTiming) {
+            System.out.println("** --disable-hold-timing: adding set_false_path -hold between all registers.");
+        }
 
         CodePerfTracker t = new CodePerfTracker(ArrayBuilder.class.getName());
         t.start("Init");
@@ -202,7 +213,16 @@ public class RapidSA {
                 createIndexedInstanceNames("drain_x", nCols),
                 "done",
                 ab.getMergedTileMap());
-        RapidSANetlistBuilder.connectIngressEgressChannelHandshake(arrayDesign, "mm2s", "s2mm");
+        if (disableGlobalControl) {
+            RapidSANetlistBuilder.tieOffDirectFlowControlPins(arrayDesign,
+                    createTileInstanceNames(nRows, nCols),
+                    createIndexedInstanceNames("drain_x", nCols),
+                    ab.getMergedTileMap(),
+                    "mm2s",
+                    "s2mm");
+        } else {
+            RapidSANetlistBuilder.connectIngressEgressChannelHandshake(arrayDesign, "mm2s", "s2mm");
+        }
         // One additional input-EB-only MM2S per remaining SLR root.
         for (int i = 1; i < inputEbRoots.length; i++) {
             RapidSANetlistBuilder.attachSecondaryInputMM2SNOCChannel(arrayDesign, "RapidSA",
@@ -294,14 +314,16 @@ public class RapidSA {
         int handshakeChainDepth = options.has("handshake-chain-depth")
                 ? (Integer) options.valueOf("handshake-chain-depth")
                 : defaultHandshakeChainDepth;
-        System.out.println("** Flop tree: depth=" + flopTreeDepth
-                + ", maxDepthPerSLR=" + maxDepthPerSLR
-                + ", chainBudget=" + chainBudget
-                + ", handshakeChainDepth=" + handshakeChainDepth
-                + " (defaults from " + nRows + "x" + nCols
-                + ": depth=" + defaultFlopTreeDepth
-                + ", maxDepthPerSLR=" + defaultMaxDepthPerSLR
-                + ", handshakeChainDepth=" + defaultHandshakeChainDepth + ")");
+        if (!disableGlobalControl) {
+            System.out.println("** Flop tree: depth=" + flopTreeDepth
+                    + ", maxDepthPerSLR=" + maxDepthPerSLR
+                    + ", chainBudget=" + chainBudget
+                    + ", handshakeChainDepth=" + handshakeChainDepth
+                    + " (defaults from " + nRows + "x" + nCols
+                    + ": depth=" + defaultFlopTreeDepth
+                    + ", maxDepthPerSLR=" + defaultMaxDepthPerSLR
+                    + ", handshakeChainDepth=" + defaultHandshakeChainDepth + ")");
+        }
 
         // Build the no-go bbox list BEFORE flatten — flattenDesign() collapses
         // the post-flatten ModuleInsts (weight EBs, input EBs, drain tiles, MM2S,
@@ -320,32 +342,34 @@ public class RapidSA {
         EDIFTools.uniqueifyNetlist(arrayDesign);
 //        DesignTools.createMissingSitePinInsts(arrayDesign);
 
-        FlopTreeTools.insertFlopTreeForNet(arrayDesign, "sa_accum_shift", "clk", flopTreeDepth, maxDepthPerSLR, noGoBboxes);
-        FlopTreeTools.insertFlopTreeForNet(arrayDesign, "output_wr_en", "clk", flopTreeDepth, maxDepthPerSLR, noGoBboxes);
-        Set<SiteInst> chainSiteInsts = new HashSet<>();
-        Net s2mmStartNet = arrayDesign.getNet("s2mm/s2mm_start");
-        // Filter to only remote sinks (in s2mm, not mm2s)
-        List<EDIFHierPortInst> s2mmStartRemoteSinks = new ArrayList<>();
-        for (EDIFHierPortInst p : s2mmStartNet.getLogicalHierNet().getLeafHierPortInsts(false)) {
-            if (p.getFullHierarchicalInstName().startsWith("s2mm/")) {
-                s2mmStartRemoteSinks.add(p);
+        if (!disableGlobalControl) {
+            FlopTreeTools.insertFlopTreeForNet(arrayDesign, "sa_accum_shift", "clk", flopTreeDepth, maxDepthPerSLR, noGoBboxes);
+            FlopTreeTools.insertFlopTreeForNet(arrayDesign, "output_wr_en", "clk", flopTreeDepth, maxDepthPerSLR, noGoBboxes);
+            Set<SiteInst> chainSiteInsts = new HashSet<>();
+            Net s2mmStartNet = arrayDesign.getNet("s2mm/s2mm_start");
+            // Filter to only remote sinks (in s2mm, not mm2s)
+            List<EDIFHierPortInst> s2mmStartRemoteSinks = new ArrayList<>();
+            for (EDIFHierPortInst p : s2mmStartNet.getLogicalHierNet().getLeafHierPortInsts(false)) {
+                if (p.getFullHierarchicalInstName().startsWith("s2mm/")) {
+                    s2mmStartRemoteSinks.add(p);
+                }
             }
-        }
-        FlopTreeTools.insertFlopChain(arrayDesign, s2mmStartNet, "clk", handshakeChainDepth,
-                s2mmStartRemoteSinks, chainSiteInsts, noGoBboxes);
-        Net s2mmDoneNet = arrayDesign.getNet("mm2s/s2mm_done");
-        // Filter to only remote sinks (in mm2s, not s2mm)
-        List<EDIFHierPortInst> s2mmDoneRemoteSinks = new ArrayList<>();
-        for (EDIFHierPortInst p : s2mmDoneNet.getLogicalHierNet().getLeafHierPortInsts(false)) {
-            if (p.getFullHierarchicalInstName().startsWith("mm2s/")) {
-                s2mmDoneRemoteSinks.add(p);
+            FlopTreeTools.insertFlopChain(arrayDesign, s2mmStartNet, "clk", handshakeChainDepth,
+                    s2mmStartRemoteSinks, chainSiteInsts, noGoBboxes);
+            Net s2mmDoneNet = arrayDesign.getNet("mm2s/s2mm_done");
+            // Filter to only remote sinks (in mm2s, not s2mm)
+            List<EDIFHierPortInst> s2mmDoneRemoteSinks = new ArrayList<>();
+            for (EDIFHierPortInst p : s2mmDoneNet.getLogicalHierNet().getLeafHierPortInsts(false)) {
+                if (p.getFullHierarchicalInstName().startsWith("mm2s/")) {
+                    s2mmDoneRemoteSinks.add(p);
+                }
             }
-        }
-        FlopTreeTools.insertFlopChain(arrayDesign, s2mmDoneNet, "clk", handshakeChainDepth,
-                s2mmDoneRemoteSinks, chainSiteInsts, noGoBboxes);
+            FlopTreeTools.insertFlopChain(arrayDesign, s2mmDoneNet, "clk", handshakeChainDepth,
+                    s2mmDoneRemoteSinks, chainSiteInsts, noGoBboxes);
 
-        for (SiteInst si : chainSiteInsts) {
-            si.routeSite();
+            for (SiteInst si : chainSiteInsts) {
+                si.routeSite();
+            }
         }
 
         // Insert the top-level BUFGCE just before write/route, so it doesn't
@@ -356,10 +380,13 @@ public class RapidSA {
 
         // Add clock constraint
         arrayDesign.addXDCConstraint("create_clock -period 2.0 -name clk [get_ports clk_in]");
+        if (disableHoldTiming) {
+            arrayDesign.addXDCConstraint("set_false_path -hold -from [all_registers] -to [all_registers]");
+        }
 
         arrayDesign.setDesignOutOfContext(true);
         String baseDcpName = "systolic_array_" + nRows + "x" + nCols;
-//        arrayDesign.writeCheckpoint(baseDcpName + ".dcp");
+        arrayDesign.writeCheckpoint(baseDcpName + ".dcp");
 
         if (options.has("route")) {
             ArrayBuilder.unrouteStaticNets(arrayDesign);
@@ -1194,9 +1221,8 @@ public class RapidSA {
             AccelConfig.LinearLayer l = linears.get(i);
             int er = RapidSANetlistBuilder.effectiveNRows(l, i);
             int ec = RapidSANetlistBuilder.effectiveNCols(l, i);
-            System.out.printf("   SA[%d] %dx%d  paddedTileIn=%d paddedTileOut=%d%s%n",
-                    i, er, ec, l.paddedTileIn, l.paddedTileOut,
-                    (i == 0 ? "" : "  [rotated]"));
+            System.out.printf("   SA[%d] %dx%d  paddedBatch=%d paddedTileIn=%d paddedTileOut=%d%n",
+                    i, er, ec, l.paddedBatch, l.paddedTileIn, l.paddedTileOut);
         }
         Device device = Device.getDevice(partName);
         int slrCount = device.getSLRs().length;

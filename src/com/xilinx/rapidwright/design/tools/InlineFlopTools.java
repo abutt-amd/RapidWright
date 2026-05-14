@@ -451,43 +451,27 @@ public class InlineFlopTools {
      * @param design The current design from which to remove the flops
      */
     public static void removeInlineFlops(Design design) {
-        Map<Net, Set<SitePinInst>> pinsToRemove = new HashMap<>();
-        List<SiteInst> siteInstToRemove = new ArrayList<>();
+        Map<SiteInst, Set<Cell>> inlineCellsBySite = new HashMap<>();
         List<EDIFCellInst> cellsToRemove = new ArrayList<>();
-        Net vcc = design.getVccNet();
-        Set<SitePinInst> vccPins = new HashSet<>();
-        pinsToRemove.put(vcc, vccPins);
-        String[] staticPins = getStaticPins(design);
+        Set<String> inlineFlopCellNames = new HashSet<>();
         for (EDIFCellInst inst : design.getTopEDIFCell().getCellInsts()) {
             if (inst.getName().endsWith(INLINE_SUFFIX)) {
                 Cell flop = design.getCell(inst.getName());
                 if (flop == null) {
                     flop = design.getCell(EDIFTools.VIVADO_PRESERVE_PORT_INTERFACE + inst.getName());
                 }
+                if (flop == null) {
+                    throw new RuntimeException("Could not find physical inline flop cell " + inst.getName());
+                }
+                inlineFlopCellNames.add(flop.getName());
                 SiteInst si = flop.getSiteInst();
-                if (si.getSiteName().contains("SLICE_X114Y552")) {
-                    System.out.println();
+                if (si == null) {
+                    throw new RuntimeException("Inline flop " + flop.getName() + " is not placed");
                 }
-                // Assume we only placed one flop per SiteInst
-                siteInstToRemove.add(si);
-                for (SitePinInst pin : si.getSitePinInsts()) {
-                    if (pin.getNet().isGNDNet()) {
-                        continue;
-                    }
-                    pinsToRemove.computeIfAbsent(pin.getNet(), p -> new HashSet<>()).add(pin);
-                }
-                for (String staticPin : staticPins) {
-                    if (si.getSitePinInst(staticPin) == null) {
-                        vccPins.add(vcc.createPin(staticPin, si));
-                    }
-                }
-
+                inlineCellsBySite.computeIfAbsent(si, k -> new HashSet<>()).add(flop);
                 cellsToRemove.add(inst);
             }
         }
-
-
-        DesignTools.batchRemoveSitePins(pinsToRemove, true);
 
         String[] ctrlPins = new String[]{"C", "R", "CE"};
         EDIFCell top = design.getTopEDIFCell();
@@ -527,15 +511,34 @@ public class InlineFlopTools {
             }
 
             top.removeCellInst(c);
-            design.removeCell(c.getName());
         }
 
-        for (SiteInst si : siteInstToRemove) {
-            boolean isStaticSource = si.getSitePinInsts().stream()
-                    .anyMatch((p) -> p.getNet() != null && p.getNet().isGNDNet() && p.isOutPin());
-            if (!isStaticSource) {
-                design.removeSiteInst(si);
+        for (Map.Entry<SiteInst, Set<Cell>> entry : inlineCellsBySite.entrySet()) {
+            SiteInst si = entry.getKey();
+            Set<Cell> inlineCells = entry.getValue();
+            for (Cell cell : new ArrayList<>(si.getCells())) {
+                if (!isInlineHarnessSiteCell(cell, inlineCells)) {
+                    throw new RuntimeException("Inline flop harness shares SiteInst " + si.getName()
+                            + " with non-harness cell " + cell.getName()
+                            + " (all cells: " + si.getCells() + ")");
+                }
             }
+            si.unrouteSite();
+            for (SitePinInst spi : new ArrayList<>(si.getSitePinInsts())) {
+                Net net = spi.getNet();
+                if (net != null) {
+                    net.removePin(spi);
+                }
+                si.removePin(spi);
+            }
+            for (Cell cell : new ArrayList<>(si.getCells())) {
+                if (design.getCell(cell.getName()) != null) {
+                    design.removeCell(cell);
+                } else if (cell.getBEL() != null) {
+                    si.removeCell(cell.getBEL());
+                }
+            }
+            design.removeSiteInst(si, true);
         }
 
         // Strip orphan physical Nets whose name still carries the inline-flop
@@ -546,7 +549,7 @@ public class InlineFlopTools {
         // into Module relocation as a Net with edifNet=NO and unrouted sinks.
         List<Net> orphanNets = new ArrayList<>();
         for (Net n : design.getNets()) {
-            if (n.getName().endsWith(INLINE_SUFFIX)) {
+            if (n.getName().contains(INLINE_SUFFIX)) {
                 orphanNets.add(n);
             }
         }
@@ -558,6 +561,38 @@ public class InlineFlopTools {
         }
 
         removeInlineFlopConstraints(design);
+        assertNoInlineFlopPhysicalState(design, inlineFlopCellNames);
+    }
+
+    private static boolean isInlineHarnessSiteCell(Cell cell, Set<Cell> inlineCells) {
+        if (inlineCells.contains(cell) || cell.getName().contains(INLINE_SUFFIX)) {
+            return true;
+        }
+        BEL bel = cell.getBEL();
+        return bel != null && bel.isAnyIMR();
+    }
+
+    private static void assertNoInlineFlopPhysicalState(Design design, Set<String> removedCellNames) {
+        for (Cell cell : design.getCells()) {
+            if (cell.getName().contains(INLINE_SUFFIX) || removedCellNames.contains(cell.getName())) {
+                throw new RuntimeException("Inline flop physical cell remains after removal: "
+                        + cell.getName());
+            }
+        }
+        for (Net net : design.getNets()) {
+            if (net.getName().contains(INLINE_SUFFIX)) {
+                throw new RuntimeException("Inline flop physical net remains after removal: "
+                        + net.getName());
+            }
+        }
+        for (SiteInst si : design.getSiteInsts()) {
+            for (Cell cell : si.getCells()) {
+                if (cell.getName().contains(INLINE_SUFFIX) || removedCellNames.contains(cell.getName())) {
+                    throw new RuntimeException("Inline flop site cell remains after removal: "
+                            + cell.getName() + " in " + si.getName());
+                }
+            }
+        }
     }
 
     /**

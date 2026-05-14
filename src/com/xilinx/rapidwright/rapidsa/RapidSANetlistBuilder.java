@@ -287,14 +287,11 @@ public class RapidSANetlistBuilder {
             String prefix = "sa" + i + "_";
             boolean hasInputEB = (i == 0);
             boolean hasDrain = (i == last);
-            // SA[0] uses standard orientation (activations from west via InputEB,
-            // weights from north via WeightEB). SAs[1..] are "rotated":
-            // activations enter via top-row north_inputs (driven by the prior
-            // ReluTile), so we swap nRows/nCols so the array's column count
-            // matches the upstream output width (paddedTileIn) rather than the
-            // downstream output width (paddedTileOut).
-            int nRows = (i == 0) ? layer.nRows() : layer.nCols();
-            int nCols = (i == 0) ? layer.nCols() : layer.nRows();
+            // Rows are output lanes and columns are batch lanes. Batch is
+            // constant across adjacent layers, so keep the physical dimensions
+            // in this orientation for every SA.
+            int nRows = layer.nRows();
+            int nCols = layer.nCols();
             buildArraySegment(ctx, prefix, nRows, nCols,
                     hasInputEB, hasDrain, true);
         }
@@ -303,13 +300,13 @@ public class RapidSANetlistBuilder {
 
     /**
      * Returns the effective {@code nRows} for the SA at index {@code saIdx} in
-     * a multi-SA chain, applying the SA[1..] dimension swap. Match
+     * a multi-SA chain. Match
      * {@link #createMultiSANetlist} so callers of {@link #attachMM2SForSA}
      * and {@link #attachReluBetweenSAs} pass dims that agree with the built
      * netlist.
      */
     public static int effectiveNRows(AccelConfig.LinearLayer layer, int saIdx) {
-        return (saIdx == 0) ? layer.nRows() : layer.nCols();
+        return layer.nRows();
     }
 
     /**
@@ -317,7 +314,7 @@ public class RapidSANetlistBuilder {
      * See {@link #effectiveNRows}.
      */
     public static int effectiveNCols(AccelConfig.LinearLayer layer, int saIdx) {
-        return (saIdx == 0) ? layer.nCols() : layer.nRows();
+        return layer.nCols();
     }
 
     /**
@@ -1279,6 +1276,45 @@ public class RapidSANetlistBuilder {
         EDIFNet gndNet = EDIFTools.getStaticNet(NetType.GND, topCell, design.getNetlist());
         EDIFCellInst s2mmInst = requireCellInst(topCell, s2mmInstanceName);
         claimPortInst(gndNet, S2MM_START, s2mmInst);
+    }
+
+    public static void tieOffDirectFlowControlPins(Design design,
+                                                   String[][] gemmInstanceNames,
+                                                   String[] drainInstanceNames,
+                                                   Map<String, Pair<EDIFCellInst, String>> mergedTileMap,
+                                                   String mm2sInstanceName,
+                                                   String s2mmInstanceName) {
+        EDIFCell topCell = design.getNetlist().getTopCell();
+        EDIFNet gndNet = EDIFTools.getStaticNet(NetType.GND, topCell, design.getNetlist());
+
+        for (String[] rowInstanceNames : gemmInstanceNames) {
+            for (String gemmInstanceName : rowInstanceNames) {
+                Pair<EDIFCellInst, String> merged = mergedTileMap == null ? null : mergedTileMap.get(gemmInstanceName);
+                if (merged != null) {
+                    claimPortInst(gndNet, merged.getSecond() + GEMM_ACCUM_SHIFT, merged.getFirst());
+                } else {
+                    claimPortInst(gndNet, GEMM_ACCUM_SHIFT, requireCellInst(topCell, gemmInstanceName));
+                }
+            }
+        }
+
+        if (drainInstanceNames != null && drainInstanceNames.length > 0) {
+            EDIFCellInst firstDrain = requireCellInst(topCell, drainInstanceNames[0]);
+            int accumCount = getPortWidth(firstDrain.getCellType(), DRAIN_FIFO_WR_EN);
+            for (String drainInstanceName : drainInstanceNames) {
+                EDIFCellInst drain = requireCellInst(topCell, drainInstanceName);
+                for (int k = 0; k < accumCount; k++) {
+                    claimPortInst(gndNet, DRAIN_FIFO_WR_EN + "[" + k + "]", drain);
+                }
+            }
+        }
+
+        if (s2mmInstanceName != null) {
+            claimPortInst(gndNet, S2MM_START, requireCellInst(topCell, s2mmInstanceName));
+        }
+        if (mm2sInstanceName != null) {
+            claimPortInst(gndNet, MM2S_S2MM_DONE, requireCellInst(topCell, mm2sInstanceName));
+        }
     }
 
     public static void connectIngressEgressChannelHandshake(Design design, String ingressInstanceName,

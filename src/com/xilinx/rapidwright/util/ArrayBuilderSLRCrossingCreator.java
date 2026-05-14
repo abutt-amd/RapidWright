@@ -22,15 +22,17 @@
  */
 package com.xilinx.rapidwright.util;
 
+import com.xilinx.rapidwright.design.Cell;
 import com.xilinx.rapidwright.design.ConstraintGroup;
 import com.xilinx.rapidwright.design.Design;
+import com.xilinx.rapidwright.design.DesignTools;
 import com.xilinx.rapidwright.design.Module;
-import com.xilinx.rapidwright.design.ModuleInst;
+import com.xilinx.rapidwright.design.Net;
 import com.xilinx.rapidwright.design.NetTools;
 import com.xilinx.rapidwright.design.blocks.PBlock;
+import com.xilinx.rapidwright.design.blocks.PBlockRange;
 import com.xilinx.rapidwright.design.blocks.PBlockSide;
 import com.xilinx.rapidwright.design.tools.ArrayBuilder;
-import com.xilinx.rapidwright.design.DesignTools;
 import com.xilinx.rapidwright.design.tools.InlineFlopTools;
 import com.xilinx.rapidwright.design.xdc.ConstraintTools;
 import com.xilinx.rapidwright.device.IntentCode;
@@ -38,30 +40,33 @@ import com.xilinx.rapidwright.device.Node;
 import com.xilinx.rapidwright.device.SLR;
 import com.xilinx.rapidwright.device.Site;
 import com.xilinx.rapidwright.device.Tile;
+import com.xilinx.rapidwright.edif.EDIFCell;
 import com.xilinx.rapidwright.edif.EDIFCellInst;
 import com.xilinx.rapidwright.edif.EDIFHierCellInst;
+import com.xilinx.rapidwright.edif.EDIFNet;
 import com.xilinx.rapidwright.edif.EDIFNetlist;
+import com.xilinx.rapidwright.edif.EDIFPort;
 import com.xilinx.rapidwright.edif.EDIFPortInst;
 import com.xilinx.rapidwright.edif.EDIFTools;
-import com.xilinx.rapidwright.edif.EDIFPort;
-import com.xilinx.rapidwright.edif.EDIFCell;
+import com.xilinx.rapidwright.rapidsa.RapidSAPrecompile;
 import joptsimple.OptionParser;
 import joptsimple.OptionSet;
 
-import java.io.File;
 import java.io.IOException;
 import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.HashMap;
-import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.TreeMap;
 
 public class ArrayBuilderSLRCrossingCreator {
     public static final String PE_RUN_DIR = "PerformanceExplorer";
+    private static final String PE_CLOCK_BUFG_NAME = "pe_clk_bufg";
+    private static final String PE_CLOCK_INPUT_NET_NAME = "clk_in";
     private static final List<String> INPUT_KERNEL_OPTS = Arrays.asList("k", "kernel");
     private static final List<String> CROSSING_DESIGN_OPTS = Arrays.asList("c", "crossing");
     private static final List<String> TOP_INST_NAME_OPTS = Arrays.asList("t", "top-inst");
@@ -74,6 +79,8 @@ public class ArrayBuilderSLRCrossingCreator {
     private static final double DEFAULT_MAX_CLK_UNCERT = 0.250;
     private static final double DEFAULT_STEP_CLK_UNCERT = 0.025;
     private static final double DEFAULT_BASE_CLK_UNCERT = 0.300;
+    private static final double DEFAULT_SLR_CROSSING_MAX_DELAY = 1.600;
+    private static final double DEFAULT_SLR_CROSSING_MIN_DELAY = 0.250;
     private static final int MAX_SLR_CROSSING_PBLOCK_SEPARATION_ROWS = 200;
 
     private static OptionParser createOptionParser() {
@@ -154,6 +161,126 @@ public class ArrayBuilderSLRCrossingCreator {
         pblock.setIsSoft(false);
         for (String tclCmd : pblock.getTclConstraints()) {
             design.addXDCConstraint(ConstraintGroup.LATE, tclCmd);
+        }
+    }
+
+    private static PBlock createSpanningPBlock(PBlock topPBlock, PBlock bottomPBlock) {
+        Map<String, NamespaceRows> rowsByPrefix = new TreeMap<>();
+        addRelevantPrefixes(rowsByPrefix, topPBlock);
+        addRelevantPrefixes(rowsByPrefix, bottomPBlock);
+
+        int minRow = Math.min(topPBlock.getTopLeftTile().getRow(), bottomPBlock.getTopLeftTile().getRow());
+        int maxRow = Math.max(topPBlock.getBottomRightTile().getRow(), bottomPBlock.getBottomRightTile().getRow());
+        int minCol = Math.min(topPBlock.getTopLeftTile().getColumn(), bottomPBlock.getTopLeftTile().getColumn());
+        int maxCol = Math.max(topPBlock.getBottomRightTile().getColumn(), bottomPBlock.getBottomRightTile().getColumn());
+
+        for (int row = minRow; row <= maxRow; row++) {
+            for (int col = minCol; col <= maxCol; col++) {
+                Tile tile = topPBlock.getDevice().getTile(row, col);
+                if (tile == null || tile.getSites() == null) {
+                    continue;
+                }
+                for (Site site : tile.getSites()) {
+                    NamespaceRows namespaceRows = rowsByPrefix.get(site.getNameSpacePrefix());
+                    if (namespaceRows != null) {
+                        namespaceRows.include(site);
+                    }
+                }
+            }
+        }
+
+        PBlock spanningPBlock = new PBlock(topPBlock.getDevice(), "");
+        for (NamespaceRows namespaceRows : rowsByPrefix.values()) {
+            namespaceRows.addRangesTo(spanningPBlock);
+        }
+        return spanningPBlock;
+    }
+
+    private static void addRelevantPrefixes(Map<String, NamespaceRows> rowsByPrefix, PBlock pblock) {
+        for (PBlockRange range : pblock) {
+            if (!range.isSiteRange()) {
+                throw new RuntimeException("Expected site-based SLR crossing pblock range, got: " + range);
+            }
+            Site lowerLeft = range.getLowerLeftSite();
+            Site upperRight = range.getUpperRightSite();
+            String prefix = lowerLeft.getNameSpacePrefix();
+            if (!prefix.equals(upperRight.getNameSpacePrefix())) {
+                throw new RuntimeException("Mismatched pblock range namespaces: " + range);
+            }
+
+            if (!rowsByPrefix.containsKey(prefix)) {
+                rowsByPrefix.put(prefix, new NamespaceRows(prefix, lowerLeft.getName(), pblock.getDevice()));
+            }
+        }
+    }
+
+    private static class NamespaceRows {
+        private final String prefix;
+        private final String templateSiteName;
+        private final com.xilinx.rapidwright.device.Device device;
+        private final TreeMap<Integer, RowBounds> rows = new TreeMap<>();
+
+        private NamespaceRows(String prefix, String templateSiteName,
+                              com.xilinx.rapidwright.device.Device device) {
+            this.prefix = prefix;
+            this.templateSiteName = templateSiteName;
+            this.device = device;
+        }
+
+        private void include(Site site) {
+            rows.computeIfAbsent(site.getInstanceY(), RowBounds::new).include(site);
+        }
+
+        private void addRangesTo(PBlock pblock) {
+            RowBounds open = null;
+            for (RowBounds row : rows.values()) {
+                if (open == null) {
+                    open = row.copy();
+                } else if (open.canMerge(row)) {
+                    open.maxY = row.maxY;
+                } else {
+                    addRange(pblock, open);
+                    open = row.copy();
+                }
+            }
+            if (open != null) {
+                addRange(pblock, open);
+            }
+        }
+
+        private void addRange(PBlock pblock, RowBounds row) {
+            String lowerLeft = PBlockRange.replaceXY(templateSiteName, row.minX, row.minY);
+            String upperRight = PBlockRange.replaceXY(templateSiteName, row.maxX, row.maxY);
+            pblock.add(new PBlockRange(device, lowerLeft + ":" + upperRight));
+        }
+    }
+
+    private static class RowBounds {
+        private final int minY;
+        private int maxY;
+        private int minX = Integer.MAX_VALUE;
+        private int maxX = Integer.MIN_VALUE;
+
+        private RowBounds(int y) {
+            this.minY = y;
+            this.maxY = y;
+        }
+
+        private void include(Site site) {
+            minX = Math.min(minX, site.getInstanceX());
+            maxX = Math.max(maxX, site.getInstanceX());
+        }
+
+        private boolean canMerge(RowBounds other) {
+            return maxY + 1 == other.minY && minX == other.minX && maxX == other.maxX;
+        }
+
+        private RowBounds copy() {
+            RowBounds copy = new RowBounds(minY);
+            copy.maxY = maxY;
+            copy.minX = minX;
+            copy.maxX = maxX;
+            return copy;
         }
     }
 
@@ -243,14 +370,14 @@ public class ArrayBuilderSLRCrossingCreator {
                                          Map<EDIFPort, PBlockSide> sideMap,
                                          String topInstName, String bottomInstName,
                                          String outputPath) {
-        createSLRCrossing(kernelDesign, topDesign, sideMap, topInstName, bottomInstName, outputPath, null, 1.6, false);
+        createSLRCrossing(kernelDesign, topDesign, sideMap, topInstName, bottomInstName, outputPath, null, 1.6, false, false);
     }
 
     public static void createSLRCrossing(Design kernelDesign, Design topDesign,
                                          Map<EDIFPort, PBlockSide> sideMap,
                                          String topInstName, String bottomInstName,
                                          String outputPath, PBlock pblockOverride) {
-        createSLRCrossing(kernelDesign, topDesign, sideMap, topInstName, bottomInstName, outputPath, pblockOverride, 1.6, false);
+        createSLRCrossing(kernelDesign, topDesign, sideMap, topInstName, bottomInstName, outputPath, pblockOverride, 1.6, false, false);
     }
 
     public static void createSLRCrossing(Design kernelDesign, Design topDesign,
@@ -258,7 +385,7 @@ public class ArrayBuilderSLRCrossingCreator {
                                          String topInstName, String bottomInstName,
                                          String outputPath, PBlock pblockOverride,
                                          double clkPeriod) {
-        createSLRCrossing(kernelDesign, topDesign, sideMap, topInstName, bottomInstName, outputPath, pblockOverride, clkPeriod, false);
+        createSLRCrossing(kernelDesign, topDesign, sideMap, topInstName, bottomInstName, outputPath, pblockOverride, clkPeriod, false, false);
     }
 
     public static void createSLRCrossing(Design kernelDesign, Design topDesign,
@@ -266,6 +393,16 @@ public class ArrayBuilderSLRCrossingCreator {
                                          String topInstName, String bottomInstName,
                                          String outputPath, PBlock pblockOverride,
                                          double clkPeriod, boolean reusePreviousResults) {
+        createSLRCrossing(kernelDesign, topDesign, sideMap, topInstName, bottomInstName,
+                outputPath, pblockOverride, clkPeriod, reusePreviousResults, false);
+    }
+
+    public static void createSLRCrossing(Design kernelDesign, Design topDesign,
+                                         Map<EDIFPort, PBlockSide> sideMap,
+                                         String topInstName, String bottomInstName,
+                                         String outputPath, PBlock pblockOverride,
+                                         double clkPeriod, boolean reusePreviousResults,
+                                         boolean disableHoldTiming) {
         if (!kernelDesign.getDevice().getName().equals("xcv80")) {
             System.out.println("SLRCrossing creator currently only tested for xcv80");
         }
@@ -330,7 +467,7 @@ public class ArrayBuilderSLRCrossingCreator {
         PBlock bottomPBlock = chooseBestCandidate(topPBlock, candidates);
         bottomPBlock.setName("pblock_1");
 
-        PBlock overallPBlock = new PBlock(kernelDesign.getDevice(), topPBlock + " " + bottomPBlock);
+        PBlock overallPBlock = createSpanningPBlock(topPBlock, bottomPBlock);
         overallPBlock.setName("pblock_2");
 
         addPBlockToDesign(topDesign, overallPBlock);
@@ -381,12 +518,19 @@ public class ArrayBuilderSLRCrossingCreator {
         InlineFlopTools.createAndPlacePortFlopsOnSide(topDesign, "clk", bottomPBlock, bottomSideMap);
         netlist.resetParentNetMap();
 
+        insertPEClockBUFGCE(topDesign);
         EDIFTools.ensurePreservedInterfaceVivado(topDesign.getNetlist());
+        addSLRCrossingTimingGuardbandConstraint(topDesign, topInstName, bottomInstName);
+        if (disableHoldTiming) {
+            addSLRCrossingHoldFalsePathConstraint(topDesign, topInstName, bottomInstName);
+        }
+        addNoReplicateConstraintsForSLRCrossingNets(topDesign, topInstName, bottomInstName);
 
         String runDirectory = Paths.get(outputPath).getParent().resolve(PE_RUN_DIR).toString();
         explorePerformance(topDesign, runDirectory, reusePreviousResults, clkPeriod);
         Design bestDesign = Design.readCheckpoint(Paths.get(runDirectory, "pblock0_best.dcp").toString());
         EDIFTools.removeVivadoBusPreventionAnnotations(bestDesign.getNetlist());
+        removePEClockBUFGCE(bestDesign);
         InlineFlopTools.removeInlineFlops(bestDesign);
         NetTools.unrouteTopLevelNetsThatLeavePBlock(bestDesign, topPBlock);
         NetTools.unrouteTopLevelNetsThatLeavePBlock(bestDesign, bottomPBlock);
@@ -394,6 +538,99 @@ public class ArrayBuilderSLRCrossingCreator {
         DesignTools.createMissingSitePinInsts(bestDesign);
 
         bestDesign.writeCheckpoint(outputPath);
+    }
+
+    private static void insertPEClockBUFGCE(Design design) {
+        EDIFCell topCell = design.getTopEDIFCell();
+        EDIFNet clkNet = topCell.getNet("clk");
+        if (clkNet == null) {
+            throw new RuntimeException("Expected top-level clk net for SLR-crossing PE BUFG insertion");
+        }
+        EDIFPortInst clkPortInst = clkNet.getPortInst(null, "clk");
+        if (clkPortInst == null) {
+            throw new RuntimeException("Expected top-level clk port-inst on clk net");
+        }
+
+        clkNet.removePortInst(clkPortInst);
+        EDIFNet clkInNet = topCell.createNet(PE_CLOCK_INPUT_NET_NAME);
+        clkInNet.addPortInst(clkPortInst);
+
+        Site bufgSite = design.getDevice().getSite(RapidSAPrecompile.DEFAULT_HD_CLK_SRC);
+        if (bufgSite == null) {
+            throw new RuntimeException("Unable to find PE BUFG site "
+                    + RapidSAPrecompile.DEFAULT_HD_CLK_SRC);
+        }
+        Cell bufg = ArrayBuilder.createBUFGCE(design, topCell, PE_CLOCK_BUFG_NAME, bufgSite);
+
+        Net physicalClk = design.getNet("clk");
+        if (physicalClk == null) {
+            physicalClk = design.createNet("clk");
+        }
+        physicalClk.connect(bufg, "O");
+
+        Net physicalClkIn = design.getNet(PE_CLOCK_INPUT_NET_NAME);
+        if (physicalClkIn == null) {
+            physicalClkIn = design.createNet(PE_CLOCK_INPUT_NET_NAME);
+        }
+        physicalClkIn.connect(bufg, "I");
+    }
+
+    private static void removePEClockBUFGCE(Design design) {
+        ArrayBuilder.removeBUFGs(design);
+        removeConstraintsContaining(design, PE_CLOCK_BUFG_NAME);
+        removeConstraintsContaining(design, PE_CLOCK_INPUT_NET_NAME);
+    }
+
+    private static void removeConstraintsContaining(Design design, String token) {
+        for (ConstraintGroup cg : ConstraintGroup.values()) {
+            List<String> constraints = design.getXDCConstraints(cg);
+            if (constraints.isEmpty()) continue;
+            List<String> filtered = new ArrayList<>();
+            for (String line : constraints) {
+                if (!line.contains(token)) {
+                    filtered.add(line);
+                }
+            }
+            if (filtered.size() != constraints.size()) {
+                design.setXDCConstraints(filtered, cg);
+            }
+        }
+    }
+
+    private static void addSLRCrossingTimingGuardbandConstraint(Design design, String topInstName,
+                                                                 String bottomInstName) {
+        String topRegs = "[get_cells -hier -quiet -filter {NAME =~ " + topInstName
+                + "/* && IS_SEQUENTIAL}]";
+        String bottomRegs = "[get_cells -hier -quiet -filter {NAME =~ " + bottomInstName
+                + "/* && IS_SEQUENTIAL}]";
+        design.addXDCConstraint(ConstraintGroup.LATE,
+                "set_max_delay " + DEFAULT_SLR_CROSSING_MAX_DELAY
+                        + " -from " + topRegs + " -to " + bottomRegs);
+        design.addXDCConstraint(ConstraintGroup.LATE,
+                "set_min_delay " + DEFAULT_SLR_CROSSING_MIN_DELAY
+                        + " -from " + topRegs + " -to " + bottomRegs);
+    }
+
+    private static void addSLRCrossingHoldFalsePathConstraint(Design design, String topInstName,
+                                                               String bottomInstName) {
+        String topRegs = "[get_cells -hier -quiet -filter {NAME =~ " + topInstName
+                + "/* && IS_SEQUENTIAL}]";
+        String bottomRegs = "[get_cells -hier -quiet -filter {NAME =~ " + bottomInstName
+                + "/* && IS_SEQUENTIAL}]";
+        design.addXDCConstraint(ConstraintGroup.LATE,
+                "set_false_path -hold -from " + topRegs + " -to " + bottomRegs);
+    }
+
+    private static void addNoReplicateConstraintsForSLRCrossingNets(Design design, String topInstName,
+                                                                     String bottomInstName) {
+        String crossingNets = "[get_nets -hier -quiet -filter {NAME =~ " + topInstName + "/*}]";
+        String crossingSegments = "[get_nets -quiet -segments " + crossingNets + "]";
+        String crossingDrivers = "[get_cells -quiet -of_objects [get_pins -quiet -filter {DIRECTION == OUT} "
+                + "-of_objects " + crossingSegments + "]]";
+        design.addXDCConstraint(ConstraintGroup.LATE,
+                "set_property DONT_TOUCH true " + crossingSegments);
+        design.addXDCConstraint(ConstraintGroup.LATE,
+                "set_property DONT_TOUCH true " + crossingDrivers);
     }
 
     public static Map<String, String> getBlackBoxToTopLevelMap(EDIFNetlist netlist, String blackBoxName) {

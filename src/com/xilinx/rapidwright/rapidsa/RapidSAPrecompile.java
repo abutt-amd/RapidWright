@@ -37,7 +37,7 @@ import com.xilinx.rapidwright.edif.EDIFNet;
 import com.xilinx.rapidwright.edif.EDIFNetlist;
 import com.xilinx.rapidwright.edif.EDIFPort;
 import com.xilinx.rapidwright.edif.EDIFTools;
-import com.xilinx.rapidwright.rapidsa.components.BufferTile;
+import com.xilinx.rapidwright.rapidsa.components.GEMMTile;
 import com.xilinx.rapidwright.rapidsa.components.RapidComponent;
 import com.xilinx.rapidwright.util.ArrayBuilderSLRCrossingCreator;
 import com.xilinx.rapidwright.util.FileTools;
@@ -76,12 +76,18 @@ public class RapidSAPrecompile {
     public static final String SLR_CROSSING_RUN_DIR = "SLRCrossing";
     public static final String SLR_CROSSING_TOP_INST_NAME = "slr_crossing_top";
     public static final String SLR_CROSSING_BOTTOM_INST_NAME = "slr_crossing_bottom";
+    private static final String SLR_CROSSING_WRAPPER_SV_NAME = "slr_crossing_combined.sv";
+    private static final String SLR_CROSSING_SYNTH_TCL_NAME = "slr_crossing_synth.tcl";
+    private static final String SLR_CROSSING_XDC_NAME = "slr_crossing_constraints.xdc";
+    private static final boolean USE_COMBINED_SLR_CROSSING_SYNTH = true;
+    private static final boolean DISABLE_SLR_CROSSING_HOLD_TIMING = true;
     private static final double DEFAULT_MIN_CLK_UNCERT = -0.100;
     private static final double DEFAULT_MAX_CLK_UNCERT = 0.250;
     private static final double DEFAULT_STEP_CLK_UNCERT = 0.025;
     private static final List<PlacerDirective> DEFAULT_PLACE_DIRECTIVES = Arrays.asList(PlacerDirective.Default, PlacerDirective.Explore);
     private static final List<RouterDirective> DEFAULT_ROUTE_DIRECTIVES = Arrays.asList(RouterDirective.Default, RouterDirective.Explore);
     private static final String DEFAULT_VIVADO = "vivado";
+    public static final String DEFAULT_HD_CLK_SRC = "BUFGCE_X2Y0";
 
     /**
      * When true, both the per-component PerformanceExplorer pass and the
@@ -94,12 +100,12 @@ public class RapidSAPrecompile {
 
     private static final List<RapidComponent> COMPONENTS = Collections.unmodifiableList(
             Arrays.asList(
-//                    new GEMMTile(4, 4),
+                    new GEMMTile(4, 4)
 //                    new EdgeBufferTile(4, EdgeBufferTile.Type.WEIGHT),
 //                    new EdgeBufferTile(4, EdgeBufferTile.Type.INPUT),
 //                    new DrainTile(4, 16),
 //                    new ReluTile(4, 8)
-                    new BufferTile(4, 8)
+//                    new BufferTile(4, 8)
 //                    new MM2SNOCChannel(),
 //                    new S2MMNOCChannel()
             )
@@ -127,8 +133,9 @@ public class RapidSAPrecompile {
     private static List<String> getXDCConstraints(RapidComponent component, double clkPeriod) {
         List<String> lines = new ArrayList<>();
         lines.add("create_clock -period " + clkPeriod + " -name clk [get_ports " + component.getClkName() + "]");
-        lines.add("set_clock_uncertainty -setup 0.3 [get_clocks clk]");
-        lines.add("set_clock_uncertainty -hold 0.1 [get_clocks clk]");
+        lines.add("set_property HD.CLK_SRC " + DEFAULT_HD_CLK_SRC + " [get_ports " + component.getClkName() + "]");
+        lines.add("# set_clock_uncertainty -setup 0.3 [get_clocks clk]");
+        lines.add("# set_clock_uncertainty -hold 0.1 [get_clocks clk]");
         return lines;
     }
 
@@ -152,12 +159,17 @@ public class RapidSAPrecompile {
         String slrCrossingDir = compOutputDir + File.separator + SLR_CROSSING_RUN_DIR;
         FileTools.makeDir(slrCrossingDir);
 
-        Design crossingSynthDesign = createSLRCrossingWrapperDesign(part, component, synthDesign, true);
         String crossingSynthPath = slrCrossingDir + File.separator + SLR_CROSSING_SYNTH_DCP_NAME;
-        crossingSynthDesign.writeCheckpoint(crossingSynthPath);
-
-        Design crossingTopDesign = createSLRCrossingWrapperDesign(part, component,
-                Design.readCheckpoint(pnrDcpName), false);
+        Design crossingTopDesign;
+        if (USE_COMBINED_SLR_CROSSING_SYNTH && component instanceof GEMMTile) {
+            compileCombinedGEMMSLRCrossingSynth(part, compOutputDir, slrCrossingDir, clkPeriod);
+            crossingTopDesign = Design.readCheckpoint(crossingSynthPath);
+        } else {
+            Design crossingSynthDesign = createSLRCrossingWrapperDesign(part, component, synthDesign, true);
+            crossingSynthDesign.writeCheckpoint(crossingSynthPath);
+            crossingTopDesign = createSLRCrossingWrapperDesign(part, component,
+                    Design.readCheckpoint(pnrDcpName), false);
+        }
         String crossingPath = slrCrossingDir + File.separator + SLR_CROSSING_DCP_NAME;
         Design d = Design.readCheckpoint(pnrDcpName);
         // The SLR-crossing PE run directory lives inside slrCrossingDir; wipe
@@ -175,7 +187,109 @@ public class RapidSAPrecompile {
                 crossingPath,
                 component.getSLRCrossingPBlock(),
                 clkPeriod,
-                REUSE_PE_RESULTS);
+                REUSE_PE_RESULTS,
+                DISABLE_SLR_CROSSING_HOLD_TIMING);
+    }
+
+    private static void compileCombinedGEMMSLRCrossingSynth(Part part, String compOutputDir,
+                                                             String slrCrossingDir,
+                                                             double clkPeriod) {
+        String wrapperPath = slrCrossingDir + File.separator + SLR_CROSSING_WRAPPER_SV_NAME;
+        FileTools.writeLinesToTextFile(getCombinedGEMMSLRCrossingWrapper(), wrapperPath);
+
+        String xdcPath = slrCrossingDir + File.separator + SLR_CROSSING_XDC_NAME;
+        FileTools.writeLinesToTextFile(Collections.singletonList(
+                "create_clock -period " + clkPeriod + " -name clk [get_ports clk]"), xdcPath);
+
+        List<String> lines = new ArrayList<>();
+        lines.add("set part \"" + part.toString() + "\"");
+        lines.add("set output_dir \"" + slrCrossingDir + "\"");
+        lines.add("create_project -in_memory -part $part rapid_slr_crossing_synth_proj");
+        for (String line : new GEMMTile(4, 4).getDesignTclLines()) {
+            if (line.startsWith("set_property top ")) {
+                continue;
+            }
+            lines.add(line);
+        }
+        lines.add("read_verilog -sv " + wrapperPath);
+        lines.add("read_xdc " + xdcPath);
+        lines.add("update_compile_order -fileset sources_1");
+        lines.add("set_property top tile_slr_crossing [current_fileset]");
+        lines.add("synth_design -mode out_of_context -flatten_hierarchy none -top tile_slr_crossing -part $part");
+        lines.add("write_checkpoint -force $output_dir/" + SLR_CROSSING_SYNTH_DCP_NAME);
+
+        String scriptPath = slrCrossingDir + File.separator + SLR_CROSSING_SYNTH_TCL_NAME;
+        FileTools.writeLinesToTextFile(lines, scriptPath);
+        Path outputLog = Paths.get(slrCrossingDir, "slr_crossing_synth.log");
+        if (!REUSE_PE_RESULTS) {
+            VivadoTools.runTcl(outputLog, Paths.get(scriptPath), true);
+        }
+    }
+
+    private static List<String> getCombinedGEMMSLRCrossingWrapper() {
+        return Arrays.asList(
+                "`timescale 1ns / 1ps",
+                "module tile_slr_crossing",
+                "  #(parameter WIDTH = 4,",
+                "    parameter HEIGHT = 4,",
+                "    parameter BITS = 8)",
+                "  (",
+                "    input  logic [BITS-1:0] slr_crossing_top_west_inputs [0:HEIGHT-1],",
+                "    input  logic            slr_crossing_top_west_inputs_valid [0:HEIGHT-1],",
+                "    input  logic [BITS-1:0] slr_crossing_top_accum_inputs [0:WIDTH-1],",
+                "    input  logic [BITS-1:0] slr_crossing_top_north_inputs [0:WIDTH-1],",
+                "    input  logic            slr_crossing_top_north_inputs_valid [0:WIDTH-1],",
+                "    input  logic            clk,",
+                "    input  logic            slr_crossing_top_accum_shift,",
+                "    output logic [BITS-1:0] slr_crossing_top_east_outputs [0:HEIGHT-1],",
+                "    output logic            slr_crossing_top_east_outputs_valid [0:HEIGHT-1],",
+                "",
+                "    input  logic [BITS-1:0] slr_crossing_bottom_west_inputs [0:HEIGHT-1],",
+                "    input  logic            slr_crossing_bottom_west_inputs_valid [0:HEIGHT-1],",
+                "    input  logic            slr_crossing_bottom_accum_shift,",
+                "    output logic [BITS-1:0] slr_crossing_bottom_east_outputs [0:HEIGHT-1],",
+                "    output logic            slr_crossing_bottom_east_outputs_valid [0:HEIGHT-1],",
+                "    output logic [BITS-1:0] slr_crossing_bottom_south_outputs [0:WIDTH-1],",
+                "    output logic            slr_crossing_bottom_south_outputs_valid [0:WIDTH-1],",
+                "    output logic [BITS-1:0] slr_crossing_bottom_accum_outputs [0:WIDTH-1]",
+                "  );",
+                "",
+                "  logic [BITS-1:0] crossing_south_outputs [0:WIDTH-1];",
+                "  logic            crossing_south_outputs_valid [0:WIDTH-1];",
+                "  logic [BITS-1:0] crossing_accum_outputs [0:WIDTH-1];",
+                "",
+                "  (* keep_hierarchy = \"yes\" *)",
+                "  tile #(.WIDTH(WIDTH), .HEIGHT(HEIGHT), .BITS(BITS)) slr_crossing_top (",
+                "    .west_inputs(slr_crossing_top_west_inputs),",
+                "    .west_inputs_valid(slr_crossing_top_west_inputs_valid),",
+                "    .accum_inputs(slr_crossing_top_accum_inputs),",
+                "    .north_inputs(slr_crossing_top_north_inputs),",
+                "    .north_inputs_valid(slr_crossing_top_north_inputs_valid),",
+                "    .clk(clk),",
+                "    .accum_shift(slr_crossing_top_accum_shift),",
+                "    .east_outputs(slr_crossing_top_east_outputs),",
+                "    .east_outputs_valid(slr_crossing_top_east_outputs_valid),",
+                "    .south_outputs(crossing_south_outputs),",
+                "    .south_outputs_valid(crossing_south_outputs_valid),",
+                "    .accum_outputs(crossing_accum_outputs)",
+                "  );",
+                "",
+                "  (* keep_hierarchy = \"yes\" *)",
+                "  tile #(.WIDTH(WIDTH), .HEIGHT(HEIGHT), .BITS(BITS)) slr_crossing_bottom (",
+                "    .west_inputs(slr_crossing_bottom_west_inputs),",
+                "    .west_inputs_valid(slr_crossing_bottom_west_inputs_valid),",
+                "    .accum_inputs(crossing_accum_outputs),",
+                "    .north_inputs(crossing_south_outputs),",
+                "    .north_inputs_valid(crossing_south_outputs_valid),",
+                "    .clk(clk),",
+                "    .accum_shift(slr_crossing_bottom_accum_shift),",
+                "    .east_outputs(slr_crossing_bottom_east_outputs),",
+                "    .east_outputs_valid(slr_crossing_bottom_east_outputs_valid),",
+                "    .south_outputs(slr_crossing_bottom_south_outputs),",
+                "    .south_outputs_valid(slr_crossing_bottom_south_outputs_valid),",
+                "    .accum_outputs(slr_crossing_bottom_accum_outputs)",
+                "  );",
+                "endmodule");
     }
 
     private static EDIFDirection getPortDirection(EDIFPort port) {
